@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AEC Data Model Viewer</title>
+    
+    <!-- Autodesk Viewer SDK -->
+    <link rel="stylesheet" href="https://developer.api.autodesk.com/modelderivative/v2/viewers/7.*/style.css">
+    <script src="https://developer.api.autodesk.com/modelderivative/v2/viewers/7.*/viewer3D.js"></script>
+    
+    <!-- Application Styles -->
+    <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+    <div class="header">
+        <button class="btn btn-primary" onclick="openSettingsModal()">Settings</button>
+        <button class="btn btn-secondary" id="loginBtn" onclick="loginWithAutodesk()">Login With Autodesk</button>
+    </div>
+
+    <div class="container" id="mainContainer">
+        <div class="login-prompt">
+            <h2>Welcome to AEC Data Model Viewer</h2>
+            <p>Please configure your settings and login to get started.</p>
+        </div>
+    </div>
+
+    <!-- Viewer Modal -->
+    <div id="viewerModal" class="viewer-modal">
+        <div class="viewer-modal-content">
+            <div class="viewer-modal-header">
+                <h2 id="viewerModalTitle" style="margin: 0; color: white;">Model Viewer</h2>
+                <button class="viewer-close-btn" onclick="closeViewerModal()">&times;</button>
+            </div>
+            <div class="viewer-body">
+                <div class="viewer-sidebar">
+                    <div class="viewer-sidebar-header">
+                        Category Filter
+                    </div>
+                    <div class="viewer-sidebar-content">
+                        <div id="categoryResults"></div>
+                        <div id="elementList" style="margin-top: 15px;"></div>
+                    </div>
+                </div>
+                <div class="properties-panel" id="propertiesPanel">
+                    <div class="properties-panel-header">
+                        <span id="propertiesPanelTitle">Element Properties</span>
+                        <button class="properties-close-btn" onclick="closePropertiesPanel()">&times;</button>
+                    </div>
+                    <div class="properties-panel-content" id="propertiesPanelContent">
+                        <div style="padding: 20px; text-align: center; color: #999;">Select an element to view properties</div>
+                    </div>
+                </div>
+                <div class="viewer-container">
+                    <div id="viewerDiv"></div>
+                    <div id="viewerLoading" class="viewer-loading">
+                        <div style="font-size: 18px; margin-bottom: 10px;">⟳</div>
+                        <div>Initializing viewer...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div class="modal" id="settingsModal">
+        <div class="modal-content">
+            <div class="modal-header">Settings</div>
+            <div class="form-group">
+                <label class="form-label">Client ID</label>
+                <input type="text" class="form-input" id="clientId" placeholder="Enter your Client ID">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Client Secret</label>
+                <input type="password" class="form-input" id="clientSecret" placeholder="Enter your Client Secret">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Callback URL</label>
+                <input type="text" class="form-input" id="callbackUrl" placeholder="http://localhost:3000/callback" value="http://localhost:3000/callback">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Region</label>
+                <select class="form-input" id="region">
+                    <option value="US">United States (US)</option>
+                    <option value="EMEA">Europe (EMEA)</option>
+                    <option value="CAN">Canada (CAN)</option>
+                    <option value="GBR">United Kingdom (GBR)</option>
+                    <option value="DEU">Germany (DEU)</option>
+                    <option value="IND">India (IND)</option>
+                    <option value="JPN">Japan (JPN)</option>
+                    <option value="AUS">Australia (AUS)</option>
+                </select>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeSettingsModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="saveSettings()">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Treemap Modal -->
+    <div id="treemapModal" style="display:none;position:fixed;z-index:9999;top:60px;left:50%;transform:translateX(-50%);
+         width:900px;height:620px;min-width:400px;min-height:300px;background:white;border-radius:8px;
+         box-shadow:0 8px 40px rgba(0,0,0,0.35);resize:both;overflow:hidden;flex-direction:column;">
+        <div id="treemapHeader" style="background:#7b1fa2;color:white;padding:10px 16px;cursor:move;
+             display:flex;justify-content:space-between;align-items:center;user-select:none;flex-shrink:0;">
+            <span style="font-weight:bold;">🌳 Parameter Treemap</span>
+            <div style="display:flex;gap:8px;align-items:center;">
+                <button id="treemapBackBtn" onclick="treemapBackToPicker()"
+                    style="display:none;background:rgba(255,255,255,0.2);border:1px solid rgba(255,255,255,0.4);
+                           color:white;padding:3px 10px;border-radius:3px;cursor:pointer;font-size:12px;">
+                    ← Parameters
+                </button>
+                <button onclick="closeTreemapModal()"
+                    style="background:none;border:none;color:white;font-size:22px;cursor:pointer;line-height:1;padding:0;">
+                    &times;
+                </button>
+            </div>
+        </div>
+        <div id="treemapBody" style="flex:1;overflow:auto;padding:12px;box-sizing:border-box;height:calc(100% - 44px);"></div>
+    </div>
+
+    <!-- D3 v7 -->
+    <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+
+    <!-- Application Scripts (in dependency order) -->
+    <script src="js/config.js"></script>
+    <script src="js/logging.js"></script>
+    <script src="js/auth.js"></script>
+    <script src="js/graphql.js"></script>
+    <script src="js/viewer.js"></script>
+    <script src="js/treemap.js"></script>
+    <script src="js/ui.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,28 @@
+{
+  "name": "aec-data-model-viewer",
+  "version": "1.0.0",
+  "description": "AEC Data Model Viewer with OAuth 3-legged authentication for Autodesk APS",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "keywords": [
+    "autodesk",
+    "aps",
+    "aec",
+    "data-model",
+    "graphql",
+    "oauth"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "axios": "^1.6.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}

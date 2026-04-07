@@ -1,0 +1,75 @@
+HTML:
+
+<div id="viewer"></div>
+
+CSS:
+
+#viewer {
+  position: absolute;
+  inset: 0;
+}
+
+#models {
+  position: absolute;
+  left: 1em;
+  top: 1em;
+  z-index: 1;
+}
+
+JS:
+
+import { initViewer } from "https://aps-codepen.autodesk.io/utils.js";
+
+function addViewable(viewer, urn, xform, offset) {
+  return new Promise(function (resolve, reject) {
+    function onDocumentLoadSuccess(doc) {
+      const viewable = doc.getRoot().getDefaultGeometry();
+      const options = {
+        //  preserveView: true,
+        keepCurrentModels: true
+      };
+      if (xform) {
+        options.placementTransform = xform;
+      }
+      if (offset) {
+        options.globalOffset = offset;
+      }
+      viewer
+        .loadDocumentNode(doc, viewable, options)
+        .then(resolve)
+        .catch(reject);
+    }
+    function onDocumentLoadFailure(code) {
+      reject(`Could not load document (${code}).`);
+    }
+    Autodesk.Viewing.Document.load(
+      "urn:" + urn,
+      onDocumentLoadSuccess,
+      onDocumentLoadFailure
+    );
+  });
+}
+
+const viewer = await initViewer(document.getElementById("viewer"), {
+  extensions: ["Autodesk.DocumentBrowser"]
+});
+
+await addViewable(
+  viewer,
+  "dXJuOmFkc2sub2JqZWN0czpvcy5vYmplY3Q6YXBzLWNvZGVwZW4tYmFja2VuZC8wMV9yYWNfYmFzaWNfc2FtcGxlX3Byb2plY3QucnZ0"
+);
+
+await addViewable(
+  viewer,      
+  //"dXJuOmFkc2sub2JqZWN0czpvcy5vYmplY3Q6YXBzLWNvZGVwZW4tYmFja2VuZC8wMl9qZXRfZW5naW5lX21vZGVsLnppcA",
+  "dXJuOmFkc2sub2JqZWN0czpvcy5vYmplY3Q6YXBzLWNvZGVwZW4tYmFja2VuZC8wNV9zcGFjZXNoaXAuZjNk",
+  new THREE.Matrix4().makeRotationX(0.5 * Math.PI).scale(new THREE.Vector3(2.5, 2.5, 2.5))
+);
+
+
+Resources:
+
+https://developer.api.autodesk.com/modelderivative/v2/viewers/7.*/style.min.css
+
+https://developer.api.autodesk.com/modelderivative/v2/viewers/7.*/viewer3D.min.js
+
