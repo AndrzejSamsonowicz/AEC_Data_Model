@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Hub Loading Test</title>
+</head>
+<body>
+    <h1>Hub Loading Test</h1>
+    <button onclick="testHubs()">Test Load Hubs</button>
+    <div id="output"></div>
+
+    <script>
+        const API_BASE = window.location.origin;
+        let sessionId = localStorage.getItem('apsSessionId');
+
+        async function testHubs() {
+            const output = document.getElementById('output');
+            output.innerHTML = '<p>Testing...</p>';
+
+            try {
+                // Test 1: Check if sessionId exists
+                output.innerHTML += `<p>Session ID: ${sessionId || 'NOT FOUND'}</p>`;
+
+                if (!sessionId) {
+                    output.innerHTML += '<p style="color:red">❌ Not logged in. Please login first in main app.</p>';
+                    return;
+                }
+
+                // Test 2: Check if session is valid
+                const tokenResponse = await fetch(`${API_BASE}/api/token/${sessionId}`);
+                output.innerHTML += `<p>Token check: ${tokenResponse.ok ? '✅ Valid' : '❌ Invalid'}</p>`;
+
+                if (!tokenResponse.ok) {
+                    output.innerHTML += '<p style="color:red">Session expired. Please re-login.</p>';
+                    return;
+                }
+
+                // Test 3: Try GraphQL query for hubs
+                const query = `
+                    query GetHubs {
+                        hubs {
+                            results {
+                                id
+                                name
+                            }
+                        }
+                    }
+                `;
+
+                const response = await fetch(`${API_BASE}/api/graphql`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query, variables: {}, sessionId })
+                });
+
+                output.innerHTML += `<p>GraphQL Response: ${response.ok ? '✅ Success' : '❌ Failed'}</p>`;
+
+                const result = await response.json();
+                
+                if (result.errors) {
+                    output.innerHTML += `<p style="color:red">❌ GraphQL Errors: ${JSON.stringify(result.errors)}</p>`;
+                    return;
+                }
+
+                const hubs = result.data.hubs.results;
+                output.innerHTML += `<p style="color:green">✅ Found ${hubs.length} hubs:</p>`;
+                output.innerHTML += '<ul>';
+                hubs.forEach(hub => {
+                    output.innerHTML += `<li>${hub.name} (${hub.id})</li>`;
+                });
+                output.innerHTML += '</ul>';
+
+            } catch (error) {
+                output.innerHTML += `<p style="color:red">❌ Error: ${error.message}</p>`;
+            }
+        }
+    </script>
+</body>
+</html>

@@ -31,7 +31,10 @@ async function loadSettings() {
             document.getElementById('loginBtn').style.backgroundColor = '#4caf50';
             document.getElementById('loginBtn').onclick = logout;
             window.history.replaceState({}, document.title, window.location.pathname);
-            loadHubs();
+            // Load hubs if function is available
+            if (typeof loadHubs === 'function') {
+                setTimeout(() => loadHubs(), 100);
+            }
         } else {
             const savedSession = localStorage.getItem('apsSessionId');
             if (savedSession) {
@@ -42,7 +45,10 @@ async function loadSettings() {
                         document.getElementById('loginBtn').textContent = 'Logged In ✓';
                         document.getElementById('loginBtn').style.backgroundColor = '#4caf50';
                         document.getElementById('loginBtn').onclick = logout;
-                        loadHubs();
+                        // Load hubs if function is available
+                        if (typeof loadHubs === 'function') {
+                            setTimeout(() => loadHubs(), 100);
+                        }
                     } else {
                         localStorage.removeItem('apsSessionId');
                     }

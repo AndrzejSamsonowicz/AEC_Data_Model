@@ -9,25 +9,56 @@ async function graphqlRequest(query, variables = {}, region = null) {
     }
 
     console.log(`GraphQL Request - Region: ${region}, Variables:`, variables);
-    
-    const response = await fetch(`${API_BASE}/api/graphql`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query, variables, sessionId, region })
-    });
 
-    if (!response.ok) {
-        const errBody = await response.json().catch(() => ({}));
-        console.error(`GraphQL HTTP Error ${response.status}:`, JSON.stringify(errBody));
-        throw new Error(`HTTP ${response.status}: ${JSON.stringify(errBody)}`);
-    }
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 20000); // 20s client-side timeout
 
-    const result = await response.json();
-    if (result.errors) {
-        console.error(`GraphQL Errors:`, JSON.stringify(result.errors));
+    try {
+        const response = await fetch(`${API_BASE}/api/graphql`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query, variables, sessionId, region }),
+            signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+            const errBody = await response.json().catch(() => ({}));
+            console.error(`GraphQL HTTP Error ${response.status}:`, JSON.stringify(errBody));
+            throw new Error(`HTTP ${response.status}: ${JSON.stringify(errBody)}`);
+        }
+
+        const result = await response.json();
+        if (result.errors) {
+            console.error(`GraphQL Errors:`, JSON.stringify(result.errors));
+        }
+        console.log(`GraphQL Response - Region: ${region}:`, result);
+        return result;
+    } catch (err) {
+        clearTimeout(timeoutId);
+        if (err.name === 'AbortError') {
+            throw new Error('HTTP 504: Request timed out after 20 seconds');
+        }
+        throw err;
     }
-    console.log(`GraphQL Response - Region: ${region}:`, result);
-    return result;
+}
+
+// Unified GraphQL query execution with automatic retry on 504
+async function executeGraphQLQuery(query, variables = {}, region = null, retries = 1) {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            return await graphqlRequest(query, variables, region);
+        } catch (error) {
+            const is504 = error.message.includes('504');
+            if (is504 && attempt < retries) {
+                const delay = attempt * 2000; // 2s, then 4s
+                logDebug(`504 timeout on attempt ${attempt}/${retries}, retrying in ${delay/1000}s...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            } else {
+                throw error;
+            }
+        }
+    }
 }
 
 // ─── Data Management REST API helper ────────────────────────────────────────
@@ -43,10 +74,10 @@ async function restRequest(path, queryParams = {}) {
     return response.json();
 }
 
-// ─── Hub listing (Data Management API – single call, all ACC hubs) ──────────
+// ─── Hub listing (OLD - for tree view compatibility) ──────────
 
-async function loadHubs() {
-    console.log('loadHubs() via Data Management REST API');
+async function loadHubsOld() {
+    console.log('loadHubsOld() via Data Management REST API');
     try {
         const data = await restRequest('/api/rest/hubs');
         const accHubs = (data.data || []).filter(h =>

@@ -125,6 +125,18 @@ function closeViewerModal() {
     const categoryResults = document.getElementById('categoryResults');
     if (categoryInput) categoryInput.value = '';
     if (categoryResults) categoryResults.innerHTML = '';
+    // Hide the Show All button
+    const showAllBtn = document.getElementById('viewerShowAllBtn');
+    if (showAllBtn) showAllBtn.style.display = 'none';
+}
+
+function viewerShowAll() {
+    if (!viewer) return;
+    const models = (viewer.getAllModels) ? viewer.getAllModels() : (viewer.model ? [viewer.model] : []);
+    viewer.showAll();
+    models.forEach(m => viewer.clearThemingColors(m));
+    const showAllBtn = document.getElementById('viewerShowAllBtn');
+    if (showAllBtn) showAllBtn.style.display = 'none';
 }
 
 function loadModelsInViewer(viewerInstance, files) {
@@ -320,7 +332,75 @@ async function filterByCategoryInViewer(categoryName) {
     });
 }
 
-// INVESTIGATION: Inspect all properties available for Wall elements
+// Colour specific elements red in the viewer by their Revit Element ID values.
+// Uses cachedCategoryDbIds to avoid scanning all nodes — only scans the relevant category.
+async function isolateByRevitIds(revitIds, category) {
+    if (!viewer || !viewer.model) throw new Error('Viewer or model not loaded');
+
+    const idSet = new Set(revitIds.map(String));
+    console.log(`🎯 Highlighting ${idSet.size} element(s) by Revit Element ID (category: ${category || 'all'})...`);
+
+    // Build the list of dbIds to scan:
+    // Prefer cachedCategoryDbIds for the category (much smaller set) → fall back to all nodes.
+    let dbIdsToScan = [];
+    let modelRef = viewer.model;
+    if (category && cachedCategoryDbIds && cachedCategoryDbIds.has(category)) {
+        for (const { model, dbIds } of cachedCategoryDbIds.get(category)) {
+            dbIdsToScan.push(...dbIds);
+            modelRef = model; // use the model from the cache
+        }
+        console.log(`   Scanning ${dbIdsToScan.length} dbIds in category "${category}"`);
+    } else {
+        // Full scan fallback
+        const instanceTree = modelRef.getInstanceTree();
+        if (!instanceTree) throw new Error('Instance tree not available');
+        instanceTree.enumNodeChildren(instanceTree.getRootId(), dbId => { dbIdsToScan.push(dbId); }, true);
+        console.log(`   Full scan: ${dbIdsToScan.length} dbIds`);
+    }
+
+    // Get ALL properties for those dbIds (no propFilter — avoids display-name guessing)
+    const matchingDbIds = await new Promise((resolve, reject) => {
+        modelRef.getBulkProperties(dbIdsToScan, {}, results => {
+            const hits = [];
+            results.forEach(result => {
+                for (const p of result.properties) {
+                    if (idSet.has(String(p.displayValue))) {
+                        const nameLower = (p.displayName || '').toLowerCase();
+                        if (nameLower.includes('elementid') || nameLower.includes('element id') || nameLower.includes('element_id')) {
+                            hits.push(result.dbId);
+                            break;
+                        }
+                    }
+                }
+            });
+            resolve(hits);
+        }, reject);
+    });
+
+    console.log(`✓ Matched ${matchingDbIds.length} viewer object(s)`);
+    if (matchingDbIds.length > 0) {
+        viewer.clearThemingColors(modelRef);
+        // Isolate: selected elements stay opaque, everything else is ghosted (semi-transparent)
+        viewer.isolate(matchingDbIds, modelRef);
+        // Paint selected elements red on top of the isolation
+        const red = new THREE.Vector4(1, 0, 0, 1);
+        matchingDbIds.forEach(dbId => viewer.setThemingColor(dbId, red, modelRef));
+        viewer.fitToView(matchingDbIds, modelRef);
+        // Show the "Show All" button in the viewer header
+        const showAllBtn = document.getElementById('viewerShowAllBtn');
+        if (showAllBtn) showAllBtn.style.display = '';
+    } else {
+        console.warn('⚠ No viewer objects matched. Dumping first 3 node property names for diagnosis:');
+        // Diagnostic: log all property names from the first few scanned nodes
+        await new Promise(resolve => {
+            modelRef.getBulkProperties(dbIdsToScan.slice(0, 3), {}, r => {
+                r.forEach(item => console.log(`  dbId ${item.dbId} properties:`, item.properties.map(p => `${p.displayName}=${p.displayValue}`)));
+                resolve();
+            }, resolve);
+        });
+    }
+    return matchingDbIds;
+}
 async function inspectWallProperties() {
     return new Promise((resolve, reject) => {
         if (!viewer || !viewer.model) {
@@ -1648,7 +1728,7 @@ async function showAvailableCategories() {
         
         if (categories.length > 0) {
             let html = `<div class="category-results success" style="margin-bottom: 10px;">✓ Found ${categories.length} Viewable Categories:</div>`;
-            html += '<div style="max-height: 300px; overflow-y: auto; margin-bottom: 10px; padding: 5px; border: 1px solid #ddd; border-radius: 4px; background: white;">';
+            html += '<div style="margin-bottom: 10px; padding: 5px; border: 1px solid #ddd; border-radius: 4px; background: white;">';
             
             categories.forEach((cat, idx) => {
                 html += `<div style="padding: 6px 8px; border-bottom: 1px solid #eee; display: flex; align-items: center;">`;
@@ -1661,22 +1741,79 @@ async function showAvailableCategories() {
             
             html += '</div>';
             html += '<div id="filterStatus" style="margin-top: 10px;"></div>';
-            html += `
-            <div style="margin-top:14px;border-top:1px solid #ccc;padding-top:12px;">
-                <div style="font-weight:bold;font-size:13px;color:#1565c0;margin-bottom:8px;">🔍 Compliance Check (AEC DM)</div>
-                <input id="compCategory" placeholder="Category (e.g. Walls)" style="width:100%;box-sizing:border-box;padding:6px 8px;margin-bottom:6px;border:1px solid #ccc;border-radius:4px;font-size:12px;">
-                <input id="compParamName" placeholder="Parameter name (e.g. Fire_Resistance_Rating)" style="width:100%;box-sizing:border-box;padding:6px 8px;margin-bottom:6px;border:1px solid #ccc;border-radius:4px;font-size:12px;">
-                <input id="compAllowedValues" placeholder="Allowed values, comma-separated (e.g. EI40,EI60,EI80)" style="width:100%;box-sizing:border-box;padding:6px 8px;margin-bottom:8px;border:1px solid #ccc;border-radius:4px;font-size:12px;">
-                <button onclick="runComplianceCheck()" style="width:100%;padding:8px;background:#1565c0;color:white;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:bold;">▶ Check Compliance</button>
-                <div id="complianceResults" style="margin-top:8px;"></div>
-            </div>`;
             resultsDiv.innerHTML = html;
         } else {
             resultsDiv.innerHTML = '<div class="category-results warning">No categories found</div>';
         }
+
+        // Auto-isolate pending category (triggered from treemap "Show in Viewer")
+        if (pendingCategoryHighlight && cachedCategoryDbIds) {
+            const catName = pendingCategoryHighlight;
+            pendingCategoryHighlight = null;
+            const entries = cachedCategoryDbIds.get(catName);
+            if (entries && entries.length > 0) {
+                console.log(`🎯 Auto-isolating category "${catName}" from treemap selection`);
+                for (const { model, dbIds } of entries) {
+                    viewer.isolate(dbIds, model);
+                }
+                viewer.fitToView(entries[0].dbIds, entries[0].model);
+                setTimeout(() => {
+                    const checkboxes = document.querySelectorAll('#categoryResults input[type="checkbox"]');
+                    checkboxes.forEach(cb => { if (cb.value === catName) cb.checked = true; });
+                }, 300);
+
+                // Apply compliance coloring if triggered from compliance treemap
+                if (pendingComplianceHighlight) {
+                    const { paramName, allowedValues } = pendingComplianceHighlight;
+                    pendingComplianceHighlight = null;
+                    applyComplianceColoring(entries, paramName, allowedValues);
+                }
+            } else {
+                console.warn(`⚠ Category "${catName}" not found in viewer model(s)`);
+                pendingComplianceHighlight = null;
+            }
+        }
+
+        // Auto-isolate specific elements (triggered from zoom-view "Show in Viewer")
+        if (pendingRevitElementIds && pendingRevitElementIds.length > 0) {
+            const ids = pendingRevitElementIds;
+            const cat = pendingRevitCategory;
+            pendingRevitElementIds = null;
+            pendingRevitCategory = null;
+            isolateByRevitIds(ids, cat).catch(e => console.warn('Auto-isolate by Revit ID failed:', e.message));
+        }
     } catch (error) {
         console.error('Error getting categories from viewer:', error);
         resultsDiv.innerHTML = '<div class="category-results error">Failed to load categories</div>';
+    }
+}
+
+// ─── Compliance coloring: green = compliant, red = non-compliant ──────────────
+function applyComplianceColoring(entries, paramName, allowedValues) {
+    viewer.clearThemingColors();
+    const GREEN = new THREE.Vector4(0, 0.75, 0.25, 1);
+    const RED   = new THREE.Vector4(1, 0.18, 0.18, 1);
+
+    let compliant = 0, nonCompliant = 0;
+
+    for (const { model, dbIds } of entries) {
+        model.getBulkProperties(dbIds, {}, (results) => {
+            for (const elem of results) {
+                const prop = elem.properties?.find(p =>
+                    p.attributeName === paramName ||
+                    p.displayName === paramName ||
+                    p.attributeName === paramName.replace(/_/g, ' ') ||
+                    p.displayName === paramName.replace(/_/g, ' ') ||
+                    p.attributeName === paramName.replace(/ /g, '_') ||
+                    p.displayName === paramName.replace(/ /g, '_')
+                );
+                const val = prop ? String(prop.displayValue ?? '').trim() : '';
+                const ok = val !== '' && allowedValues.includes(val);
+                viewer.setThemingColor(elem.dbId, ok ? GREEN : RED, model);
+                if (ok) compliant++; else nonCompliant++;
+            }
+            console.log(`✅ Compliance coloring: ${compliant} green, ${nonCompliant} red`);
+        }, (err) => { console.warn('Compliance getBulkProperties error:', err); });
     }
 }
 

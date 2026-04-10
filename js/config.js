@@ -22,3 +22,7 @@ let viewerExternalIds = new Set(); // Stores all External IDs present in the loa
 let currentFilteredCategories = []; // Categories selected in the last Viewer filter operation
 let cachedCategoryDbIds = null; // Map<categoryName, [{model, dbIds}]> — populated on category discovery, reused for filtering
 let currentLoadedFiles = []; // All files currently loaded in the viewer (for multi-file AEC DM queries)
+let pendingCategoryHighlight = null;   // Set before openViewerModal() to auto-isolate a category after load
+let pendingRevitElementIds = null;     // Array of Revit Element ID strings to isolate after model load
+let pendingRevitCategory = null;       // Category name paired with pendingRevitElementIds
+let pendingComplianceHighlight = null; // { paramName, allowedValues } — color elements green/red after load

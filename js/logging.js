@@ -101,3 +101,20 @@
         // Silently fail if clear fails
     }
 })();
+
+// Logging helper functions
+function logDebug(...args) {
+    console.log('[DEBUG]', ...args);
+}
+
+function logError(...args) {
+    console.error('[ERROR]', ...args);
+}
+
+function logInfo(...args) {
+    console.info('[INFO]', ...args);
+}
+
+function logWarn(...args) {
+    console.warn('[WARN]', ...args);
+}
