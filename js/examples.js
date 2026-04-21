@@ -1582,6 +1582,9 @@ async function _probeComplianceParamName(sampleEgs, region, category, userInput)
     return null;
 }
 
+// Registry: regKey → [revitId, …]  (populated each time compliance renders)
+window._complianceElemsRegistry = {};
+
 async function executeExample1Compliance() {
     const hubSelect = document.getElementById('hubSelect');
     const hubId    = hubSelect.value;
@@ -1603,6 +1606,7 @@ async function executeExample1Compliance() {
     panel.style.display = 'block';
     if (treemapDiv) treemapDiv.innerHTML = '';
     resultsDiv.innerHTML = `<div style="color:#555;font-size:13px;padding:8px 0;">⏳ Fetching all files in hub…</div>`;
+    window._complianceElemsRegistry = {};
 
     try {
         // Step 1 — discover all element groups across the hub
@@ -1612,22 +1616,14 @@ async function executeExample1Compliance() {
             return;
         }
 
-        // Step 2 — Phase A (fast): distinctPropertyValuesInElementGroupByName
-        // Works for standard Revit schema properties. Returns empty for custom shared params.
-        const DISTINCT_Q = `
-            query ComplianceCheck($elementGroupId: ID!, $name: String!, $filter: ElementFilterInput) {
-                distinctPropertyValuesInElementGroupByName(
-                    elementGroupId: $elementGroupId, name: $name, filter: $filter
-                ) {
-                    results { values(limit: 500) { value count } }
-                }
-            }
-        `;
+        // Step 2 — Element-level scan: always fetch individual elements to get Revit Element IDs
         const ELEMENT_Q = `
             query ComplianceElements($elementGroupId: ID!, $filter: ElementFilterInput, $pagination: PaginationInput) {
                 elementsByElementGroup(elementGroupId: $elementGroupId, filter: $filter, pagination: $pagination) {
                     pagination { cursor }
                     results {
+                        id
+                        name
                         properties(pagination: { limit: 500 }) {
                             results { name value }
                         }
@@ -1638,108 +1634,69 @@ async function executeExample1Compliance() {
         const filter = { query: `property.name.category=='${category}'` };
         const BATCH  = 5;
 
-        // fileResults: [{egId, egName, projectName, total, compliant, violations, values:{}}]
+        const paramNormalized = paramName.replace(/_/g, ' ');
+        const paramAlt        = paramName.replace(/ /g, '_');
+        const matchesProp    = (n) => n === paramName || n === paramNormalized || n === paramAlt;
+        const matchesRevitId = (n) => {
+            const nl = n.toLowerCase().replace(/\s+/g, '');
+            return nl === 'revitelementid' || nl === 'elementid';
+        };
+
         let fileResults = [];
         const globalValueMap = new Map();
         let filesWithData = 0, scanned = 0;
 
-        // ── Phase A: fast path ────────────────────────────────────────────────
         for (let i = 0; i < elementGroups.length; i += BATCH) {
             await Promise.all(elementGroups.slice(i, i + BATCH).map(async eg => {
                 let fileTotal = 0, fileCompliant = 0;
                 const fileValues = {};
+                const fileElements = []; // individual element records
                 try {
-                    const res = await executeGraphQLQuery(DISTINCT_Q, {
-                        elementGroupId: eg.id, name: paramName, filter
-                    }, region, 2);
-                    const results = res.data?.distinctPropertyValuesInElementGroupByName?.results || [];
-                    for (const r of results) {
-                        for (const { value, count } of (r.values || [])) {
-                            const key = (value === null || value === '') ? '(not set)' : String(value);
-                            fileValues[key] = (fileValues[key] || 0) + count;
-                            globalValueMap.set(key, (globalValueMap.get(key) || 0) + count);
-                            fileTotal += count;
-                            if (allowedValues.includes(key)) fileCompliant += count;
+                    let cursor = null;
+                    do {
+                        const res = await executeGraphQLQuery(ELEMENT_Q, {
+                            elementGroupId: eg.id,
+                            filter,
+                            pagination: cursor ? { cursor, limit: 200 } : { limit: 200 }
+                        }, region, 2);
+                        const data = res.data?.elementsByElementGroup;
+                        for (const el of (data?.results || [])) {
+                            let paramVal = null, revitId = '';
+                            for (const p of (el.properties?.results || [])) {
+                                if (paramVal === null && matchesProp(p.name)) paramVal = p.value;
+                                if (!revitId && matchesRevitId(p.name)) revitId = String(p.value ?? '');
+                            }
+                            if (paramVal !== null && paramVal !== undefined) {
+                                const key = paramVal === '' ? '(not set)' : String(paramVal);
+                                fileValues[key] = (fileValues[key] || 0) + 1;
+                                globalValueMap.set(key, (globalValueMap.get(key) || 0) + 1);
+                                fileTotal++;
+                                const ok = allowedValues.includes(key);
+                                if (ok) fileCompliant++;
+                                fileElements.push({ revitId, paramValue: key, compliant: ok, elementName: el.name || '' });
+                            }
                         }
-                    }
+                        cursor = data?.pagination?.cursor || null;
+                    } while (cursor);
                     if (fileTotal > 0) filesWithData++;
                 } catch (e) {
-                    logDebug(`Compliance fast: skipped ${eg.name}: ${e.message.slice(0, 60)}`);
+                    logDebug(`Compliance scan: skipped ${eg.name}: ${e.message.slice(0, 60)}`);
                 }
-                fileResults.push({
-                    egId: eg.id, egName: eg.name, projectName: eg.projectName || '',
-                    fileVersionUrn: eg.fileVersionUrn || null,
-                    total: fileTotal, compliant: fileCompliant,
-                    violations: fileTotal - fileCompliant, values: fileValues
-                });
-                scanned++;
-            }));
-            resultsDiv.innerHTML = `<div style="color:#555;font-size:13px;padding:8px 0;">⏳ Scanned ${scanned}/${elementGroups.length} files… (fast mode)</div>`;
-        }
-
-        // ── Phase B: element scan fallback for custom shared parameters ───────
-        // distinctPropertyValuesInElementGroupByName only indexes standard Revit schema
-        // properties. Custom shared parameters (like Fire_Resistance_Rating) must be
-        // fetched by reading element properties directly.
-        if (globalValueMap.size === 0) {
-            resultsDiv.innerHTML = `<div style="color:#555;font-size:13px;padding:8px 0;">⏳ Custom parameter detected — scanning element properties in ${elementGroups.length} files…</div>`;
-
-            fileResults = [];
-            filesWithData = 0;
-            scanned = 0;
-            globalValueMap.clear();
-
-            // Normalize name for matching: try exact, then underscore↔space variant
-            const paramNormalized = paramName.replace(/_/g, ' ');
-            const paramAlt        = paramName.replace(/ /g, '_');
-            const matchesProp = (name) => name === paramName || name === paramNormalized || name === paramAlt;
-
-            for (let i = 0; i < elementGroups.length; i += BATCH) {
-                await Promise.all(elementGroups.slice(i, i + BATCH).map(async eg => {
-                    let fileTotal = 0, fileCompliant = 0;
-                    const fileValues = {};
-                    try {
-                        let cursor = null;
-                        do {
-                            const res = await executeGraphQLQuery(ELEMENT_Q, {
-                                elementGroupId: eg.id,
-                                filter,
-                                pagination: cursor ? { cursor, limit: 200 } : { limit: 200 }
-                            }, region, 2);
-                            const data = res.data?.elementsByElementGroup;
-                            for (const el of (data?.results || [])) {
-                                let propVal = null;
-                                for (const p of (el.properties?.results || [])) {
-                                    if (matchesProp(p.name)) { propVal = p.value; break; }
-                                }
-                                // Only count elements where the property exists (has any value)
-                                if (propVal !== null && propVal !== undefined) {
-                                    const key = propVal === '' ? '(not set)' : String(propVal);
-                                    fileValues[key] = (fileValues[key] || 0) + 1;
-                                    globalValueMap.set(key, (globalValueMap.get(key) || 0) + 1);
-                                    fileTotal++;
-                                    if (allowedValues.includes(key)) fileCompliant++;
-                                }
-                            }
-                            cursor = data?.pagination?.cursor || null;
-                        } while (cursor);
-                        if (fileTotal > 0) filesWithData++;
-                    } catch (e) {
-                        logDebug(`Compliance elements: skipped ${eg.name}: ${e.message.slice(0, 60)}`);
-                    }
+                if (fileTotal > 0) {
                     fileResults.push({
                         egId: eg.id, egName: eg.name, projectName: eg.projectName || '',
                         fileVersionUrn: eg.fileVersionUrn || null,
                         total: fileTotal, compliant: fileCompliant,
-                        violations: fileTotal - fileCompliant, values: fileValues
+                        violations: fileTotal - fileCompliant, values: fileValues,
+                        elements: fileElements
                     });
-                    scanned++;
-                }));
-                resultsDiv.innerHTML = `<div style="color:#555;font-size:13px;padding:8px 0;">⏳ Scanned ${scanned}/${elementGroups.length} files… (element scan)</div>`;
-            }
+                }
+                scanned++;
+            }));
+            resultsDiv.innerHTML = `<div style="color:#555;font-size:13px;padding:8px 0;">⏳ Scanned ${scanned}/${elementGroups.length} files…</div>`;
         }
 
-        // Step 4 — render results
+        // Step 3 — render results
         if (globalValueMap.size === 0) {
             resultsDiv.innerHTML =
                 `<div style="background:#fff8e1;border-radius:6px;padding:12px;font-size:13px;color:#795548;">` +
@@ -1748,17 +1705,15 @@ async function executeExample1Compliance() {
             return;
         }
 
-        const sorted = [...globalValueMap.entries()].sort((a, b) => b[1] - a[1]);
-        const totalElements  = sorted.reduce((s, [, c]) => s + c, 0);
-        const compliantCount = sorted.filter(([v]) => allowedValues.includes(v)).reduce((s, [, c]) => s + c, 0);
+        const totalElements  = [...globalValueMap.values()].reduce((s, c) => s + c, 0);
+        const compliantCount = [...globalValueMap.entries()].filter(([v]) => allowedValues.includes(v)).reduce((s, [, c]) => s + c, 0);
         const violationCount = totalElements - compliantCount;
         const pct = totalElements > 0 ? Math.round(compliantCount / totalElements * 100) : 0;
 
-        let html = '';
-
+        // ── Summary box ──────────────────────────────────────────────────────
         const summaryBg    = violationCount === 0 ? '#e8f5e9' : '#ffebee';
         const summaryColor = violationCount === 0 ? '#2e7d32' : '#c62828';
-        html += `<div style="background:${summaryBg};border-radius:6px;padding:10px 12px;margin-bottom:10px;font-size:13px;">`;
+        let html = `<div style="background:${summaryBg};border-radius:6px;padding:10px 12px;margin-bottom:12px;font-size:13px;">`;
         if (violationCount === 0) {
             html += `<div style="color:#2e7d32;font-weight:bold;">✅ 100% compliant — all ${totalElements.toLocaleString()} elements have allowed values.</div>`;
         } else {
@@ -1767,28 +1722,118 @@ async function executeExample1Compliance() {
         }
         html += `<div style="color:#555;font-size:11px;margin-top:4px;">Scanned ${filesWithData} of ${elementGroups.length} files with <strong>${category}</strong> data · Parameter: <strong>${paramName}</strong></div>`;
         html += `</div>`;
-
-        // Value distribution table
-        html += `<div style="border:1px solid #e0e0e0;border-radius:6px;overflow:hidden;font-size:12px;margin-bottom:16px;">`;
-        html += `<div style="background:#f5f5f5;padding:6px 12px;font-weight:600;display:grid;grid-template-columns:1fr 80px 60px;gap:8px;color:#555;">`;
-        html += `<span>${paramName} value</span><span style="text-align:right;">Elements</span><span style="text-align:center;">Status</span></div>`;
-        for (const [value, count] of sorted) {
-            const allowed = allowedValues.includes(value);
-            const rowBg   = allowed ? 'white' : '#fff3f3';
-            const badge   = allowed
-                ? `<span style="color:#2e7d32;font-weight:bold;">✓</span>`
-                : `<span style="color:#c62828;font-weight:bold;">✗</span>`;
-            html += `<div style="background:${rowBg};padding:6px 12px;border-top:1px solid #f0f0f0;display:grid;grid-template-columns:1fr 80px 60px;gap:8px;align-items:center;">`;
-            html += `<span style="color:${allowed ? '#333' : '#c62828'};font-weight:${allowed ? 400 : 600};">${value}</span>`;
-            html += `<span style="text-align:right;color:#555;">${count.toLocaleString()}</span>`;
-            html += `<span style="text-align:center;">${badge}</span>`;
-            html += `</div>`;
-        }
-        html += `</div>`;
-
         resultsDiv.innerHTML = html;
 
-        // Step 5 — treemap
+        // ── Per-file collapsible sections, sorted by violations desc ─────────
+        // Build a global registry key per (fileId, paramValue) → [revitId, …]
+        // row key format: `${egId}__${paramValue}`
+        const sortedFiles = [...fileResults].sort((a, b) => b.violations - a.violations);
+        let regKeySeq = 0;
+
+        for (const f of sortedFiles) {
+            // Build per-value buckets for this file
+            const valueBuckets = {}; // paramValue → [revitId, …]
+            for (const el of f.elements) {
+                if (!valueBuckets[el.paramValue]) valueBuckets[el.paramValue] = [];
+                if (el.revitId) valueBuckets[el.paramValue].push(el.revitId);
+            }
+
+            const section = document.createElement('div');
+            section.style.cssText = 'border:1px solid #e0e0e0;border-radius:6px;margin-bottom:8px;overflow:hidden;font-size:12px;';
+
+            // File header
+            const filePct    = f.total > 0 ? Math.round(f.compliant / f.total * 100) : 0;
+            const headerBg   = f.violations === 0 ? '#e8f5e9' : (filePct >= 80 ? '#fff8e1' : '#ffebee');
+            const statusIcon = f.violations === 0 ? '✅' : '⚠️';
+
+            const header = document.createElement('div');
+            header.style.cssText = `background:${headerBg};padding:8px 12px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;user-select:none;`;
+            header.innerHTML =
+                `<span style="font-weight:600;color:#333;">${statusIcon} ${f.egName}</span>` +
+                `<span style="display:flex;gap:16px;font-size:11px;align-items:center;">` +
+                `<span style="color:#c62828;">${f.violations.toLocaleString()} non-compliant</span>` +
+                `<span style="color:#2e7d32;">${f.compliant.toLocaleString()} compliant</span>` +
+                (f.projectName ? `<span style="color:#888;">${f.projectName}</span>` : '') +
+                `<span class="comp-arrow" style="color:#999;min-width:10px;">${f.violations > 0 ? '▼' : '▶'}</span>` +
+                `</span>`;
+
+            const tableWrap = document.createElement('div');
+            tableWrap.style.display = f.violations > 0 ? 'block' : 'none';
+
+            // Table header — checkbox col | value | elements | status
+            let tableHtml = `<div style="background:#f5f5f5;padding:5px 12px;display:grid;grid-template-columns:24px 1fr 70px 56px;gap:8px;font-weight:600;color:#555;border-top:1px solid #e0e0e0;">`;
+            tableHtml += `<span></span><span>${paramName} value</span><span style="text-align:right;">Elements</span><span style="text-align:center;">Status</span>`;
+            tableHtml += `</div>`;
+
+            // Rows: one per unique paramValue, sorted by count desc, non-compliant first
+            const sorted = Object.entries(f.values).sort((a, b) => {
+                const aOk = allowedValues.includes(a[0]) ? 1 : 0;
+                const bOk = allowedValues.includes(b[0]) ? 1 : 0;
+                if (aOk !== bOk) return aOk - bOk; // non-compliant first
+                return b[1] - a[1]; // then by count desc
+            });
+
+            for (const [value, count] of sorted) {
+                const allowed = allowedValues.includes(value);
+                const rowBg   = allowed ? '#fff' : '#fff3f3';
+                const badge   = allowed
+                    ? `<span style="color:#2e7d32;font-weight:bold;">✓</span>`
+                    : `<span style="color:#c62828;font-weight:bold;">✗</span>`;
+
+                // Register ids for this value in this file
+                const regKey = `r${regKeySeq++}`;
+                window._complianceElemsRegistry[regKey] = valueBuckets[value] || [];
+
+                const cbHtml = `<input type="checkbox" class="comp-row-cb" data-regkey="${regKey}" style="cursor:pointer;accent-color:${allowed ? '#2e7d32' : '#c62828'};">`;
+
+                tableHtml += `<div style="background:${rowBg};padding:5px 12px;border-top:1px solid #f0f0f0;display:grid;grid-template-columns:24px 1fr 70px 56px;gap:8px;align-items:center;">`;
+                tableHtml += cbHtml;
+                tableHtml += `<span style="color:${allowed ? '#333' : '#c62828'};font-weight:${allowed ? 400 : 600};">${value}</span>`;
+                tableHtml += `<span style="text-align:right;color:#555;">${count.toLocaleString()}</span>`;
+                tableHtml += `<span style="text-align:center;">${badge}</span>`;
+                tableHtml += `</div>`;
+            }
+
+            tableWrap.innerHTML = tableHtml;
+
+            header.addEventListener('click', () => {
+                const open = tableWrap.style.display !== 'none';
+                tableWrap.style.display = open ? 'none' : 'block';
+                const arrow = header.querySelector('.comp-arrow');
+                if (arrow) arrow.textContent = open ? '▶' : '▼';
+            });
+
+            section.appendChild(header);
+            section.appendChild(tableWrap);
+            resultsDiv.appendChild(section);
+        }
+
+        // ── Global "Copy selected IDs" button ────────────────────────────────
+        const copyBar = document.createElement('div');
+        copyBar.style.cssText = 'margin-top:12px;display:flex;align-items:center;gap:10px;';
+        const copySelBtn = document.createElement('button');
+        copySelBtn.textContent = '📋 Copy selected IDs';
+        copySelBtn.style.cssText = 'padding:8px 16px;font-size:13px;font-weight:600;background:#1565c0;color:white;border:none;border-radius:5px;cursor:pointer;flex:1;';
+        const copyFeedback = document.createElement('span');
+        copyFeedback.style.cssText = 'font-size:12px;color:#2e7d32;display:none;';
+        copySelBtn.addEventListener('click', () => {
+            const checked = resultsDiv.querySelectorAll('.comp-row-cb:checked');
+            const ids = [];
+            checked.forEach(cb => {
+                const list = window._complianceElemsRegistry[cb.dataset.regkey] || [];
+                ids.push(...list);
+            });
+            if (ids.length === 0) { alert('No rows checked. Select at least one non-compliant value row.'); return; }
+            navigator.clipboard.writeText(ids.join(';'));
+            copyFeedback.textContent = `✓ Copied ${ids.length} IDs`;
+            copyFeedback.style.display = 'inline';
+            setTimeout(() => { copyFeedback.style.display = 'none'; }, 3000);
+        });
+        copyBar.appendChild(copySelBtn);
+        copyBar.appendChild(copyFeedback);
+        resultsDiv.appendChild(copyBar);
+
+        // Step 4 — treemap
         if (treemapDiv) {
             renderComplianceTreemap(treemapDiv, fileResults.filter(f => f.total > 0), allowedValues, paramName, category, region);
         }
@@ -1993,7 +2038,8 @@ async function executeExample2() {
             return;
         }
 
-        // 2. Query material distribution — one call per file, in parallel batches
+        // 2a. Phase A — fast: distinctPropertyValuesInElementGroupByName
+        // Works for standard indexed Revit properties. Returns empty for custom shared params.
         const MATERIAL_QUERY = `
             query GetMaterialDist($elementGroupId: ID!, $name: String!, $filter: ElementFilterInput) {
                 distinctPropertyValuesInElementGroupByName(
@@ -2005,10 +2051,26 @@ async function executeExample2() {
                 }
             }
         `;
+        const ELEMENT_Q2 = `
+            query GetMaterialElements($elementGroupId: ID!, $filter: ElementFilterInput, $pagination: PaginationInput) {
+                elementsByElementGroup(elementGroupId: $elementGroupId, filter: $filter, pagination: $pagination) {
+                    pagination { cursor }
+                    results {
+                        properties(pagination: { limit: 500 }) {
+                            results { name value }
+                        }
+                    }
+                }
+            }
+        `;
 
-        const fileResults = [];
+        let fileResults = [];
         let processed = 0;
         const BATCH = 5;
+        const catFilter = { query: `property.name.category=='${category}'` };
+        const propNorm = materialProp.replace(/_/g, ' ');
+        const propAlt  = materialProp.replace(/ /g, '_');
+        const matchProp = (n) => n === materialProp || n === propNorm || n === propAlt;
 
         for (let i = 0; i < elementGroups.length; i += BATCH) {
             const batch = elementGroups.slice(i, i + BATCH);
@@ -2017,7 +2079,7 @@ async function executeExample2() {
                     const res = await executeGraphQLQuery(MATERIAL_QUERY, {
                         elementGroupId: eg.id,
                         name: materialProp,
-                        filter: { query: `property.name.category=='${category}'` }
+                        filter: catFilter
                     }, region, 2);
 
                     const results = res.data?.distinctPropertyValuesInElementGroupByName?.results || [];
@@ -2034,11 +2096,54 @@ async function executeExample2() {
                         fileResults.push({ egId: eg.id, egName: eg.name, projectName: eg.projectName, materials, total });
                     }
                 } catch (err) {
-                    logDebug(`Example2: skipped ${eg.name}: ${err.message.slice(0, 60)}`);
+                    logDebug(`Example2 fast: skipped ${eg.name}: ${err.message.slice(0, 60)}`);
                 }
                 processed++;
                 loadingText.textContent = `Scanning ${processed}/${totalFiles} files… (${fileResults.length} with results)`;
             }));
+        }
+
+        // 2b. Phase B — element-level fallback for custom/non-indexed properties
+        if (fileResults.length === 0) {
+            loadingText.textContent = `Custom property detected — scanning element properties…`;
+            fileResults = [];
+            processed = 0;
+
+            for (let i = 0; i < elementGroups.length; i += BATCH) {
+                const batch = elementGroups.slice(i, i + BATCH);
+                await Promise.all(batch.map(async (eg) => {
+                    const materials = {};
+                    try {
+                        let cursor = null;
+                        do {
+                            const res = await executeGraphQLQuery(ELEMENT_Q2, {
+                                elementGroupId: eg.id,
+                                filter: catFilter,
+                                pagination: cursor ? { cursor, limit: 200 } : { limit: 200 }
+                            }, region, 2);
+                            const data = res.data?.elementsByElementGroup;
+                            for (const el of (data?.results || [])) {
+                                for (const p of (el.properties?.results || [])) {
+                                    if (matchProp(p.name) && p.value != null && p.value !== '') {
+                                        const key = String(p.value);
+                                        materials[key] = (materials[key] || 0) + 1;
+                                        break;
+                                    }
+                                }
+                            }
+                            cursor = data?.pagination?.cursor || null;
+                        } while (cursor);
+                    } catch (err) {
+                        logDebug(`Example2 elements: skipped ${eg.name}: ${err.message.slice(0, 60)}`);
+                    }
+                    const total = Object.values(materials).reduce((s, c) => s + c, 0);
+                    if (total > 0) {
+                        fileResults.push({ egId: eg.id, egName: eg.name, projectName: eg.projectName, materials, total });
+                    }
+                    processed++;
+                    loadingText.textContent = `Scanning ${processed}/${totalFiles} files… (${fileResults.length} with results)`;
+                }));
+            }
         }
 
         // Sort files by total element count, most elements first
