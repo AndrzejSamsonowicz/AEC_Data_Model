@@ -8,13 +8,11 @@ async function loadSettings() {
         settings = {
             clientId: serverSettings.clientId || '',
             clientSecret: '',
-            callbackUrl: serverSettings.callbackUrl || 'http://localhost:3000/api/callback',
-            region: serverSettings.region || 'US'
+            callbackUrl: serverSettings.callbackUrl || 'http://localhost:3000/api/callback'
         };
         
         document.getElementById('clientId').value = settings.clientId;
         document.getElementById('callbackUrl').value = settings.callbackUrl;
-        document.getElementById('region').value = settings.region;
         
         // Check for OAuth callback
         const urlParams = new URLSearchParams(window.location.search);
@@ -74,8 +72,7 @@ async function saveSettings() {
     const newSettings = {
         clientId: document.getElementById('clientId').value,
         clientSecret: document.getElementById('clientSecret').value,
-        callbackUrl: document.getElementById('callbackUrl').value,
-        region: document.getElementById('region').value
+        callbackUrl: document.getElementById('callbackUrl').value
     };
 
     try {
@@ -90,8 +87,7 @@ async function saveSettings() {
             settings = {
                 clientId: newSettings.clientId,
                 clientSecret: '',
-                callbackUrl: newSettings.callbackUrl,
-                region: newSettings.region
+                callbackUrl: newSettings.callbackUrl
             };
             closeSettingsModal();
             alert('Settings saved successfully!');

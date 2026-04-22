@@ -176,6 +176,60 @@ body {
     display: block;
 }
 
+/* ── Example 1 two-column layout ─────────────────────────── */
+#example1.active {
+    display: flex !important;
+    padding: 0 !important;
+    max-width: none !important;
+    height: 100%;
+}
+
+.example1-layout {
+    display: flex;
+    width: 100%;
+    min-height: 100%;
+}
+
+.example1-sidebar {
+    width: 270px;
+    flex-shrink: 0;
+    background: white;
+    border-right: 1px solid #e0e0e0;
+    padding: 20px 18px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.example1-main {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px;
+    background: #f0f2f5;
+    min-width: 0;
+}
+
+.sidebar-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.sidebar-divider {
+    border-top: 1px solid #e8e8e8;
+    margin: 2px 0;
+}
+
+.sidebar-section-title {
+    font-size: 11px;
+    font-weight: 700;
+    color: #1565c0;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+}
+/* ────────────────────────────────────────────────────────── */
+
 .example-header {
     margin-bottom: 25px;
 }

@@ -167,7 +167,6 @@ async function executeExample1() {
     const category = document.getElementById('categorySelect').value;
 
     if (!hubId) { alert('Please select a hub first'); return; }
-    if (!category) { alert('Please select a Revit category'); return; }
 
     const selectedOption = hubSelect.options[hubSelect.selectedIndex];
     const region = selectedOption.dataset.region || 'US';
@@ -230,7 +229,10 @@ async function executeLatestQuery(hubId, category, region) {
         { hubId }, region
     );
     const projects = projectsResult.data?.projects?.results || [];
-    document.getElementById('example1Stats').textContent = `Found ${projects.length} projects. Scanning for ${category}...`;
+    const noCategory = !category;
+    document.getElementById('example1Stats').textContent = noCategory
+        ? `Found ${projects.length} projects. Retrieving all Revit files…`
+        : `Found ${projects.length} projects. Scanning for ${category}...`;
     document.getElementById('loadMoreBtn').style.display = 'none';
 
     const egQuery = `query GetEGs($projectId: ID!) {
@@ -242,15 +244,16 @@ async function executeLatestQuery(hubId, category, region) {
             results { id }
         }
     }`;
-    const filter = { query: `property.name.category=='${category}'` };
+    const filter = category ? { query: `property.name.category=='${category}'` } : null;
 
     const fileSummary = [];
     let scanned = 0;
     let totalFiles = 0;
 
     function updateStats() {
-        document.getElementById('example1Stats').textContent =
-            `${scanned}/${totalFiles || '?'} files scanned — ${category} found in ${fileSummary.length} files`;
+        document.getElementById('example1Stats').textContent = noCategory
+            ? `${scanned}/${totalFiles || '?'} files scanned — ${fileSummary.length} Revit files found`
+            : `${scanned}/${totalFiles || '?'} files scanned — ${category} found in ${fileSummary.length} files`;
     }
 
     const BATCH = 3;
@@ -268,31 +271,43 @@ async function executeLatestQuery(hubId, category, region) {
             }
 
             totalFiles += egs.length;
-            updateStats();
 
-            await Promise.all(egs.map(async (eg) => {
-                try {
-                    const r = await executeGraphQLQuery(countQuery, { elementGroupId: eg.id, filter, pagination: { limit: 1 } }, region);
-                    const data = r.data?.elementsByElementGroup;
-                    const count = data?.results?.length || 0;
-                    const hasMore = !!(data?.pagination?.cursor);
-                    if (count > 0) {
-                        fileSummary.push({ egId: eg.id, egName: eg.name, projectName: project.name, count, hasMore, fileVersionUrn: eg.fileVersionUrn });
-                        createTreemapVisualization([...fileSummary], category);
-                        await new Promise(r => setTimeout(r, 0));
-                    }
-                } catch (err) {
-                    logDebug(`Skipped ${eg.name}: ${err.message.slice(0, 80)}`);
+            if (noCategory) {
+                // No category filter — list all files immediately, equal-size tiles
+                for (const eg of egs) {
+                    fileSummary.push({ egId: eg.id, egName: eg.name, projectName: project.name, count: 1, hasMore: false, fileVersionUrn: eg.fileVersionUrn });
                 }
-                scanned++;
+                scanned += egs.length;
+                createTreemapVisualization([...fileSummary], 'All Files');
                 updateStats();
-            }));
+                await new Promise(r => setTimeout(r, 0));
+            } else {
+                updateStats();
+                await Promise.all(egs.map(async (eg) => {
+                    try {
+                        const r = await executeGraphQLQuery(countQuery, { elementGroupId: eg.id, filter, pagination: { limit: 1 } }, region);
+                        const data = r.data?.elementsByElementGroup;
+                        const count = data?.results?.length || 0;
+                        const hasMore = !!(data?.pagination?.cursor);
+                        if (count > 0) {
+                            fileSummary.push({ egId: eg.id, egName: eg.name, projectName: project.name, count, hasMore, fileVersionUrn: eg.fileVersionUrn });
+                            createTreemapVisualization([...fileSummary], category);
+                            await new Promise(r => setTimeout(r, 0));
+                        }
+                    } catch (err) {
+                        logDebug(`Skipped ${eg.name}: ${err.message.slice(0, 80)}`);
+                    }
+                    scanned++;
+                    updateStats();
+                }));
+            }
         }));
     }
 
     example1State.fileSummary = fileSummary;
-    document.getElementById('example1Stats').textContent =
-        `Found ${category} in ${fileSummary.length} of ${totalFiles} files (click a file to inspect)`;
+    document.getElementById('example1Stats').textContent = noCategory
+        ? `${fileSummary.length} Revit files across ${projects.length} projects (click a file to inspect)`
+        : `Found ${category} in ${fileSummary.length} of ${totalFiles} files (click a file to inspect)`;
 }
 
 // V1 mode: parallel count-only scan — just count elements per file, no element IDs stored
@@ -303,7 +318,10 @@ async function executeV1Query(hubId, category, region) {
         { hubId }, region
     );
     const projects = projectsResult.data?.projects?.results || [];
-    document.getElementById('example1Stats').textContent = `Found ${projects.length} projects. Scanning for ${category}...`;
+    const noCategory = !category;
+    document.getElementById('example1Stats').textContent = noCategory
+        ? `Found ${projects.length} projects. Retrieving all Revit files…`
+        : `Found ${projects.length} projects. Scanning for ${category}...`;
 
     const egQuery = `query GetEGs($projectId: ID!) {
         elementGroupsByProject(projectId: $projectId) { results { id name alternativeIdentifiers { fileVersionUrn } } }
@@ -314,15 +332,16 @@ async function executeV1Query(hubId, category, region) {
             results { id }
         }
     }`;
-    const filter = { query: `property.name.category=='${category}'` };
+    const filter = category ? { query: `property.name.category=='${category}'` } : null;
 
     const fileSummary = [];
     let scanned = 0;
     let totalFiles = 0;
 
     function updateStats() {
-        document.getElementById('example1Stats').textContent =
-            `${scanned}/${totalFiles || '?'} files scanned — ${category} found in ${fileSummary.length} files`;
+        document.getElementById('example1Stats').textContent = noCategory
+            ? `${scanned}/${totalFiles || '?'} files scanned — ${fileSummary.length} Revit files found`
+            : `${scanned}/${totalFiles || '?'} files scanned — ${category} found in ${fileSummary.length} files`;
     }
 
     // Pipeline: batches of 3 projects to avoid rate-limiting (same as buildProjectElementGroupMap).
@@ -341,8 +360,17 @@ async function executeV1Query(hubId, category, region) {
         }
 
         totalFiles += egs.length;
-        updateStats();
 
+        if (noCategory) {
+            for (const eg of egs) {
+                fileSummary.push({ egId: eg.id, egName: eg.name, projectName: project.name, count: 1, hasMore: false, fileVersionUrn: eg.fileVersionUrn });
+            }
+            scanned += egs.length;
+            createTreemapVisualization([...fileSummary], 'All Files');
+            updateStats();
+            await new Promise(r => setTimeout(r, 0));
+        } else {
+            updateStats();
         // Immediately count all files in this project in parallel
         await Promise.all(egs.map(async (eg) => {
             try {
@@ -361,12 +389,14 @@ async function executeV1Query(hubId, category, region) {
             scanned++;
             updateStats();
         }));
+        }
         }));
     }
 
     example1State.fileSummary = fileSummary;
-    document.getElementById('example1Stats').textContent =
-        `Found ${category} in ${fileSummary.length} of ${totalFiles} files (click a file to inspect)`;
+    document.getElementById('example1Stats').textContent = noCategory
+        ? `${fileSummary.length} Revit files across ${projects.length} projects (click a file to inspect)`
+        : `Found ${category} in ${fileSummary.length} of ${totalFiles} files (click a file to inspect)`;
 }
 
 async function loadMoreExample1() {
@@ -513,7 +543,7 @@ function createTreemapVisualization(fileSummary, category) {
         children: Object.keys(byProject).map(projectName => ({
             name: projectName,
             children: [{
-                name: category,
+                name: category || 'All Files',
                 children: byProject[projectName].map(f => ({
                     name: f.egName,
                     value: f.count,

@@ -45,38 +45,36 @@
         <div class="content-area" id="mainContainer">
             <!-- Example 1: Cross-Portfolio Element Search -->
             <div id="example1" class="example-content active">
-                <div class="example-header">
-                    <h2>Example 1: Cross-Project Element Search</h2>
-                    <p class="example-description">Query elements by category across ALL projects and models in a hub simultaneously - without opening any files!</p>
-                    <div style="background: #e3f2fd; border-left: 4px solid #2196F3; padding: 12px 16px; margin-top: 12px; border-radius: 4px; font-size: 14px;">
-                        <strong>💡 AEC Data Model Advantage:</strong> Traditional methods require opening each Revit file individually. With AEC Data Model, query across your entire hub (all projects &amp; models) in seconds using a single GraphQL query — a key advantage of AEC Data Model!
-                    </div>
-                </div>
+                <div class="example1-layout">
 
-                <div class="controls-panel">
-                    <!-- Row 1: Hub + Category + Execute -->
-                    <div class="controls-row">
-                        <div class="control-group">
+                    <!-- ── Left Sidebar ── -->
+                    <div class="example1-sidebar">
+                        <div>
+                            <h2 style="font-size:17px;color:#1a1a1a;margin:0 0 6px;font-weight:700;">Cross-Project Element Search</h2>
+                            <p style="color:#777;font-size:12px;line-height:1.5;margin:0;">Query elements across all projects &amp; models in a hub — no files need to be opened.</p>
+                        </div>
+
+                        <div class="sidebar-field">
                             <label class="control-label">Hub</label>
-                            <div style="display: flex; gap: 8px;">
-                                <select id="hubSelect" class="form-select" style="flex: 1;">
+                            <div style="display:flex;gap:6px;">
+                                <select id="hubSelect" class="form-select" style="flex:1;min-width:0;">
                                     <option value="">Select Hub...</option>
                                 </select>
-                                <button class="btn btn-primary" onclick="loadHubs()" title="Refresh Hubs" style="padding: 10px 16px;">↻</button>
+                                <button class="btn btn-primary" onclick="loadHubs()" title="Refresh Hubs" style="padding:8px 12px;flex-shrink:0;">↻</button>
                             </div>
                         </div>
 
-                        <div class="control-group" style="display: none;">
-                            <label class="control-label">Project</label>
+                        <!-- hidden project select (kept for JS compatibility) -->
+                        <div style="display:none;">
                             <select id="projectSelect" class="form-select">
                                 <option value="">Select Project...</option>
                             </select>
                         </div>
 
-                        <div class="control-group">
-                            <label class="control-label">Revit Category</label>
+                        <div class="sidebar-field">
+                            <label class="control-label">Revit Category <span style="color:#999;font-weight:400;font-size:11px;">(optional)</span></label>
                             <select id="categorySelect" class="form-select">
-                                <option value="">Select Category...</option>
+                                <option value="">— All categories —</option>
                                 <option value="Air Terminals">Air Terminals</option>
                                 <option value="Ceilings">Ceilings</option>
                                 <option value="Doors">Doors</option>
@@ -95,34 +93,31 @@
                             </select>
                         </div>
 
-                        <div class="controls-row-actions">
-                            <button class="btn btn-execute" onclick="executeExample1()">
-                                <span class="btn-icon">▶</span> Execute Query (Hub-Level)
-                            </button>
-                            <button id="loadMoreBtn" class="btn btn-execute" onclick="loadMoreExample1()" style="display:none;background:#666;">
-                                <span class="btn-icon">+</span> Load More Results
-                            </button>
+                        <button class="btn btn-execute" style="width:100%;" onclick="executeExample1()">
+                            <span class="btn-icon">▶</span> Execute Query
+                        </button>
+                        <button id="loadMoreBtn" class="btn btn-execute" onclick="loadMoreExample1()" style="display:none;background:#666;width:100%;">
+                            <span class="btn-icon">+</span> Load More Results
+                        </button>
+
+                        <div class="sidebar-divider"></div>
+                        <div class="sidebar-section-title">Compliance Check</div>
+
+                        <div class="sidebar-field">
+                            <label class="control-label" style="color:#1565c0;">Parameter Name</label>
+                            <input id="comp1ParamName" class="form-select" placeholder="e.g. Fire_Resistance_Rating">
                         </div>
+                        <div class="sidebar-field">
+                            <label class="control-label" style="color:#1565c0;">Allowed Values <span style="color:#999;font-weight:400;font-size:11px;">(comma-separated)</span></label>
+                            <input id="comp1AllowedValues" class="form-select" placeholder="e.g. EI60,EI120">
+                        </div>
+                        <button class="btn btn-execute" style="width:100%;background:#1565c0;" onclick="executeExample1Compliance()">
+                            <span class="btn-icon">🔍</span> Check Compliance
+                        </button>
                     </div>
 
-                    <!-- Row 2: Compliance Check -->
-                    <div class="controls-row controls-row-compliance">
-                        <div class="control-group">
-                            <label class="control-label">Parameter Name</label>
-                            <input id="comp1ParamName" class="form-select" placeholder="e.g. Fire Rating">
-                        </div>
-                        <div class="control-group">
-                            <label class="control-label">Allowed Values <span style="color:#888;font-weight:400;font-size:11px;">(comma-separated)</span></label>
-                            <input id="comp1AllowedValues" class="form-select" placeholder="e.g. EI40,EI60,EI90">
-                        </div>
-                        <div class="controls-row-actions">
-                            <button class="btn btn-execute" onclick="executeExample1Compliance()" style="background:#1565c0;">
-                                <span class="btn-icon">🔍</span> Check Compliance
-                            </button>
-                        </div>
-                    </div>
-                </div>
-
+                    <!-- ── Right Main ── -->
+                    <div class="example1-main">
                 <div class="results-panel">
                     <div class="results-header">
                         <h3>Results</h3>
@@ -168,8 +163,10 @@
                         <div id="example1ComplianceTreemap" style="margin-top:12px;"></div>
                     </div>
 
-                </div>
-            </div>
+                </div><!-- /.results-panel -->
+                    </div><!-- /.example1-main -->
+                </div><!-- /.example1-layout -->
+            </div><!-- /#example1 -->
 
             <!-- Example 2: Material Usage Analysis -->
             <div id="example2" class="example-content">
@@ -471,19 +468,6 @@ query CountEls($elementGroupId: ID!, $filter: ElementFilterInput, $pagination: P
             <div class="form-group">
                 <label class="form-label">Callback URL</label>
                 <input type="text" class="form-input" id="callbackUrl" placeholder="http://localhost:3000/callback" value="http://localhost:3000/callback">
-            </div>
-            <div class="form-group">
-                <label class="form-label">Region</label>
-                <select class="form-input" id="region">
-                    <option value="US">United States (US)</option>
-                    <option value="EMEA">Europe (EMEA)</option>
-                    <option value="CAN">Canada (CAN)</option>
-                    <option value="GBR">United Kingdom (GBR)</option>
-                    <option value="DEU">Germany (DEU)</option>
-                    <option value="IND">India (IND)</option>
-                    <option value="JPN">Japan (JPN)</option>
-                    <option value="AUS">Australia (AUS)</option>
-                </select>
             </div>
             <div class="modal-footer">
                 <button class="btn btn-secondary" onclick="closeSettingsModal()">Cancel</button>
