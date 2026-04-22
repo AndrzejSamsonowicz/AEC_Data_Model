@@ -702,7 +702,7 @@ function createTreemapVisualization(fileSummary, category) {
                 .attr('font-weight', '600')
                 .style('pointer-events', 'none');
 
-            if (h >= 28) {
+            if (h >= 28 && (d.data.value > 1 || d.data.hasMore)) {
                 g.append('text')
                     .attr('x', 4).attr('y', 25)
                     .text(`${d.data.value}${d.data.hasMore ? '+' : ''} elements`)
@@ -851,7 +851,7 @@ function showTooltip(event, d) {
         <div style="font-weight:700; margin-bottom:6px; font-size:14px;">${fileName}</div>
         <div style="font-size:12px; opacity:0.85;">📁 <strong>Project:</strong> ${projectName}</div>
         <div style="font-size:12px; opacity:0.85;">🏷️ <strong>Category:</strong> ${categoryName}</div>
-        <div style="font-size:12px; font-weight:600; margin-top:5px; color:#64b5f6;">🔢 ${count} element${count !== 1 ? 's' : ''}</div>
+        <div style="font-size:12px; font-weight:600; margin-top:5px; color:#64b5f6;">🔢 ${(count > 1 || d.data.hasMore) ? `${count}${d.data.hasMore ? '+' : ''} element${count !== 1 ? 's' : ''}` : 'Revit file'}</div>
         <div style="font-size:11px; opacity:0.6; margin-top:4px;">Click to inspect parameters</div>
     `;
 
@@ -2799,5 +2799,272 @@ function renderExample5Treemap(container) {
         );
     }).on('mouseout', () => hideTooltip());
 
+    container.appendChild(svg.node());
+}
+
+// ── Parameter Explorer ────────────────────────────────────────────────────────
+
+let paramExplorerTooltip = null;
+
+async function openParameterExplorer() {
+    if (selectedEgIds.size === 0) return;
+
+    const modal    = document.getElementById('paramExplorerModal');
+    const loading  = document.getElementById('paramExplorerLoading');
+    const progress = document.getElementById('paramExplorerProgress');
+    const subtitle = document.getElementById('paramExplorerSubtitle');
+    const treemapDiv = document.getElementById('paramExplorerTreemap');
+    const searchInput = document.getElementById('paramExplorerSearch');
+
+    modal.style.display = 'flex';
+    loading.style.display = 'flex';
+    treemapDiv.innerHTML = '';
+    if (searchInput) searchInput.value = '';
+
+    const selectedFiles = (example1State.fileSummary || []).filter(f => selectedEgIds.has(f.egId));
+    const n = selectedFiles.length;
+    subtitle.textContent = `${n} file${n !== 1 ? 's' : ''} — loading…`;
+
+    const region = example1State.region;
+    const isV1   = example1State.version === 'v1';
+    const dataKey = isV1 ? 'elementsByElementGroupAtVersion' : 'elementsByElementGroup';
+
+    const gqlQuery = isV1
+        ? `query GetElsWithProps($elementGroupId: ID!, $pagination: PaginationInput) {
+            elementsByElementGroupAtVersion(elementGroupId: $elementGroupId, versionNumber: 1, pagination: $pagination) {
+                pagination { cursor }
+                results {
+                    id
+                    properties(pagination: { limit: 200 }) { results { name value } }
+                }
+            }
+        }`
+        : `query GetElsWithProps($elementGroupId: ID!, $pagination: PaginationInput) {
+            elementsByElementGroup(elementGroupId: $elementGroupId, pagination: $pagination) {
+                pagination { cursor }
+                results {
+                    id
+                    properties(pagination: { limit: 200 }) { results { name value } }
+                }
+            }
+        }`;
+
+    // aggregated: paramName → value → { count, categories: Set, files: Set }
+    const agg = new Map();
+
+    let filesDone = 0;
+    for (const f of selectedFiles) {
+        filesDone++;
+        let cursor = null;
+        let page = 0;
+        do {
+            page++;
+            progress.textContent = `File ${filesDone} / ${n}: "${f.egName}"  —  page ${page}…`;
+            try {
+                const result = await executeGraphQLQuery(gqlQuery, {
+                    elementGroupId: f.egId,
+                    pagination: cursor ? { cursor, limit: 100 } : { limit: 100 }
+                }, region);
+                const data = result.data?.[dataKey];
+                const els  = data?.results || [];
+
+                for (const el of els) {
+                    const props = el.properties?.results || [];
+                    // Derive element's Revit category from its "Category" property
+                    const catProp   = props.find(p => p.name === 'Category');
+                    const elCategory = catProp?.value || '—';
+
+                    for (const prop of props) {
+                        const raw = prop.value;
+                        if (raw == null || String(raw).trim() === '') continue;
+                        const paramName = prop.name || '(unnamed)';
+                        const value     = String(raw).length > 120
+                            ? String(raw).slice(0, 120) + '…'
+                            : String(raw);
+
+                        if (!agg.has(paramName)) agg.set(paramName, new Map());
+                        const byValue = agg.get(paramName);
+                        if (!byValue.has(value)) byValue.set(value, { count: 0, categories: new Set(), files: new Set() });
+                        const entry = byValue.get(value);
+                        entry.count++;
+                        entry.categories.add(elCategory);
+                        entry.files.add(f.egName);
+                    }
+                }
+                cursor = data?.pagination?.cursor || null;
+            } catch (err) {
+                logDebug(`paramExplorer: ${f.egName} page ${page}: ${err.message}`);
+                cursor = null;
+            }
+        } while (cursor);
+    }
+
+    loading.style.display = 'none';
+    subtitle.textContent  = `${n} file${n !== 1 ? 's' : ''} · ${agg.size} parameters`;
+    renderParamExplorerTreemap(agg, treemapDiv);
+}
+
+function closeParameterExplorer() {
+    const modal = document.getElementById('paramExplorerModal');
+    if (modal) modal.style.display = 'none';
+    if (paramExplorerTooltip) paramExplorerTooltip.style.display = 'none';
+}
+
+function filterParamExplorerTreemap(query) {
+    const svg  = document.querySelector('#paramExplorerTreemap svg');
+    if (!svg) return;
+    const term = query.trim().toLowerCase();
+    svg.querySelectorAll('g[data-paramname]').forEach(g => {
+        const name  = (g.getAttribute('data-paramname') || '').toLowerCase();
+        const match = !term || name.includes(term);
+        g.style.opacity = match ? '' : '0.07';
+    });
+}
+
+function renderParamExplorerTreemap(agg, container) {
+    // Sort params by total element count descending
+    const params = [];
+    agg.forEach((byValue, paramName) => {
+        let total = 0;
+        byValue.forEach(e => { total += e.count; });
+        params.push({ paramName, byValue, total });
+    });
+    params.sort((a, b) => b.total - a.total);
+
+    if (params.length === 0) {
+        container.innerHTML = '<div style="padding:40px;text-align:center;color:#999;">No parameters found in selected files.</div>';
+        return;
+    }
+
+    // Build D3 hierarchy: Root → paramName (depth 1) → value (depth 2, leaf)
+    const data = {
+        name: 'Parameters',
+        children: params.map(({ paramName, byValue }) => ({
+            name: paramName,
+            children: Array.from(byValue.entries())
+                .map(([value, entry]) => ({
+                    name:       value,
+                    value:      entry.count,
+                    paramName,
+                    categories: [...entry.categories].sort(),
+                    files:      [...entry.files].sort()
+                }))
+                .sort((a, b) => b.value - a.value)
+        }))
+    };
+
+    const PARAM_PALETTE = [
+        '#aed6f1','#a9dfbf','#f9e79f','#f5cba7','#d2b4de',
+        '#a3d8d8','#f1948a','#abebc6','#fad7a0','#c9cfe8',
+        '#d7dbdd','#f7dc6f','#82e0aa','#85c1e9','#c39bd3',
+        '#f0b27a','#76d7c4','#ec7063','#d4e6f1','#d5f5e3'
+    ];
+    const color = d3.scaleOrdinal()
+        .domain(params.map(p => p.paramName))
+        .range(PARAM_PALETTE);
+
+    const width       = Math.max(600, (container.clientWidth || 1100) - 4);
+    const totalLeaves = params.reduce((s, p) => s + p.byValue.size, 0);
+    const height      = Math.max(600, Math.min(3000, totalLeaves * 26 + params.length * 28));
+
+    const root = d3.hierarchy(data)
+        .sum(d => d.value || 0)
+        .sort((a, b) => b.value - a.value);
+
+    d3.treemap()
+        .size([width, height])
+        .paddingTop(d  => d.depth === 0 ? 0 : d.depth === 1 ? 22 : 16)
+        .paddingRight( d => d.depth >= 1 ? 3 : 0)
+        .paddingBottom(d => d.depth >= 1 ? 3 : 0)
+        .paddingLeft(  d => d.depth >= 1 ? 3 : 0)
+        .round(true)(root);
+
+    const svg  = d3.create('svg').attr('width', width).attr('height', height);
+    const node = svg.selectAll('g')
+        .data(root.descendants())
+        .join('g')
+        .attr('transform', d => `translate(${d.x0},${d.y0})`);
+
+    // Tag depth-1 groups for filter
+    node.filter(d => d.depth === 1).attr('data-paramname', d => d.data.name);
+
+    node.append('rect')
+        .attr('width',  d => Math.max(0, d.x1 - d.x0))
+        .attr('height', d => Math.max(0, d.y1 - d.y0))
+        .attr('fill', d => {
+            if (d.depth === 0) return 'transparent';
+            return color(d.depth === 1 ? d.data.name : d.data.paramName);
+        })
+        .attr('opacity', d => d.depth === 1 ? 0.32 : 0.88)
+        .attr('stroke', 'white')
+        .attr('stroke-width', d => d.depth === 1 ? 2 : 1)
+        .attr('rx', d => d.depth <= 1 ? 4 : 2);
+
+    // Parameter name labels (depth 1)
+    node.filter(d => d.depth === 1).each(function(d) {
+        const w = d.x1 - d.x0, h = d.y1 - d.y0;
+        if (w < 22 || h < 16) return;
+        const maxChars = Math.max(4, Math.floor(w / 7.5));
+        const label    = d.data.name.length > maxChars ? d.data.name.slice(0, maxChars - 1) + '…' : d.data.name;
+        d3.select(this).append('text')
+            .attr('x', 5).attr('y', 15)
+            .text(label)
+            .attr('font-size', '11px').attr('fill', '#111').attr('font-weight', '700')
+            .style('pointer-events', 'none');
+    });
+
+    // Value labels (depth 2 leaves)
+    node.filter(d => d.depth === 2).each(function(d) {
+        const w = d.x1 - d.x0, h = d.y1 - d.y0;
+        if (w < 16 || h < 12) return;
+        const g        = d3.select(this);
+        const maxChars = Math.max(3, Math.floor(w / 6.5));
+        const label    = (d.data.name || '').length > maxChars
+            ? (d.data.name || '').slice(0, maxChars - 1) + '…'
+            : (d.data.name || '');
+        g.append('text')
+            .attr('x', 4).attr('y', 13)
+            .text(label)
+            .attr('font-size', '10px').attr('fill', '#111').attr('font-weight', '600')
+            .style('pointer-events', 'none');
+        if (h >= 26 && d.data.value > 0) {
+            g.append('text')
+                .attr('x', 4).attr('y', 24)
+                .text(`${d.data.value.toLocaleString()}×`)
+                .attr('font-size', '9px').attr('fill', '#333')
+                .style('pointer-events', 'none');
+        }
+    });
+
+    // Tooltip on leaf hover
+    node.filter(d => d.depth === 2)
+        .style('cursor', 'default')
+        .on('mousemove', function(event, d) {
+            if (!paramExplorerTooltip) {
+                paramExplorerTooltip = document.createElement('div');
+                paramExplorerTooltip.style.cssText = [
+                    'position:fixed', 'background:rgba(0,0,0,0.9)', 'color:white',
+                    'padding:10px 14px', 'border-radius:6px', 'font-size:12px',
+                    'max-width:360px', 'pointer-events:none', 'z-index:9999', 'line-height:1.6'
+                ].join(';');
+                document.body.appendChild(paramExplorerTooltip);
+            }
+            const cats  = (d.data.categories || []).join(', ') || '—';
+            const files = (d.data.files || []).join(', ') || '—';
+            paramExplorerTooltip.innerHTML =
+                `<div style="font-weight:700;font-size:13px;margin-bottom:4px;">${d.data.paramName}</div>` +
+                `<div><span style="opacity:.7">Value:</span> <strong>${d.data.name}</strong></div>` +
+                `<div><span style="opacity:.7">Elements:</span> <strong>${d.data.value.toLocaleString()}</strong></div>` +
+                `<div><span style="opacity:.7">Categories:</span> ${cats}</div>` +
+                `<div><span style="opacity:.7">Files:</span> ${files}</div>`;
+            paramExplorerTooltip.style.left    = (event.clientX + 16) + 'px';
+            paramExplorerTooltip.style.top     = (event.clientY + 12) + 'px';
+            paramExplorerTooltip.style.display = 'block';
+        })
+        .on('mouseout', function() {
+            if (paramExplorerTooltip) paramExplorerTooltip.style.display = 'none';
+        });
+
+    container.innerHTML = '';
     container.appendChild(svg.node());
 }
