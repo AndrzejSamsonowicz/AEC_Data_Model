@@ -2879,39 +2879,54 @@ async function openParameterExplorer() {
 
     const processFile = async (f) => {
         let cursor = null, page = 0;
+        let pageLimit = 50;   // start conservative; backs off further on 504
         do {
             page++;
             if (modal.style.display === 'none') return;   // modal was closed
-            try {
-                const result = await executeGraphQLQuery(gqlQuery, {
-                    elementGroupId: f.egId,
-                    pagination: cursor ? { cursor, limit: 200 } : { limit: 200 }
-                }, region);
-                const data = result.data?.[dataKey];
-                for (const el of (data?.results || [])) {
-                    const props = el.properties?.results || [];
-                    const elCat = (props.find(p => p.name === 'Category')?.value) || '—';
-                    for (const prop of props) {
-                        const raw = prop.value;
-                        if (raw == null || String(raw).trim() === '') continue;
-                        const paramName = prop.name || '(unnamed)';
-                        const value     = String(raw).length > 120
-                            ? String(raw).slice(0, 120) + '…'
-                            : String(raw);
-                        if (!agg.has(paramName)) agg.set(paramName, new Map());
-                        const byValue = agg.get(paramName);
-                        if (!byValue.has(value)) byValue.set(value, { count: 0, categories: new Set(), files: new Set() });
-                        const entry = byValue.get(value);
-                        entry.count++;
-                        entry.categories.add(elCat);
-                        entry.files.add(f.egName);
+            let attempt = 0;
+            let data = null;
+            while (attempt < 3) {
+                attempt++;
+                try {
+                    const result = await executeGraphQLQuery(gqlQuery, {
+                        elementGroupId: f.egId,
+                        pagination: cursor ? { cursor, limit: pageLimit } : { limit: pageLimit }
+                    }, region);
+                    data = result.data?.[dataKey];
+                    break;   // success
+                } catch (err) {
+                    const isTimeout = err.message.includes('504') || err.message.includes('timeout') || err.message.includes('Time-out');
+                    if (isTimeout && pageLimit > 10) {
+                        pageLimit = Math.max(10, Math.floor(pageLimit / 2));
+                        logDebug(`paramExplorer: ${f.egName} p${page} timeout — retrying with limit ${pageLimit}`);
+                    } else {
+                        logDebug(`paramExplorer: ${f.egName} p${page}: ${err.message}`);
+                        cursor = null;
+                        break;
                     }
                 }
-                cursor = data?.pagination?.cursor || null;
-            } catch (err) {
-                logDebug(`paramExplorer: ${f.egName} p${page}: ${err.message}`);
-                cursor = null;
             }
+            if (!data) break;
+            for (const el of (data?.results || [])) {
+                const props = el.properties?.results || [];
+                const elCat = (props.find(p => p.name === 'Category')?.value) || '—';
+                for (const prop of props) {
+                    const raw = prop.value;
+                    if (raw == null || String(raw).trim() === '') continue;
+                    const paramName = prop.name || '(unnamed)';
+                    const value     = String(raw).length > 120
+                        ? String(raw).slice(0, 120) + '…'
+                        : String(raw);
+                    if (!agg.has(paramName)) agg.set(paramName, new Map());
+                    const byValue = agg.get(paramName);
+                    if (!byValue.has(value)) byValue.set(value, { count: 0, categories: new Set(), files: new Set() });
+                    const entry = byValue.get(value);
+                    entry.count++;
+                    entry.categories.add(elCat);
+                    entry.files.add(f.egName);
+                }
+            }
+            cursor = data?.pagination?.cursor || null;
         } while (cursor);
 
         filesDone++;
@@ -2919,8 +2934,8 @@ async function openParameterExplorer() {
         _peScheduleRender();
     };
 
-    // Process 3 files in parallel
-    const CONCURRENCY = 3;
+    // Process 2 files in parallel (3 caused 504 timeouts on large files)
+    const CONCURRENCY = 2;
     for (let i = 0; i < selectedFiles.length; i += CONCURRENCY) {
         if (modal.style.display === 'none') break;
         await Promise.all(selectedFiles.slice(i, i + CONCURRENCY).map(processFile));
