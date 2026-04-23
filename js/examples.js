@@ -2805,75 +2805,92 @@ function renderExample5Treemap(container) {
 // ── Parameter Explorer ────────────────────────────────────────────────────────
 
 let paramExplorerTooltip = null;
+let paramExplorerZoomState = null;   // null = overview  |  string = zoomed paramName
+let _peRenderScheduled    = false;   // debounce flag for progressive render
+
+const _PE_PALETTE = [
+    '#aed6f1','#a9dfbf','#f9e79f','#f5cba7','#d2b4de',
+    '#a3d8d8','#f1948a','#abebc6','#fad7a0','#c9cfe8',
+    '#d7dbdd','#f7dc6f','#82e0aa','#85c1e9','#c39bd3',
+    '#f0b27a','#76d7c4','#ec7063','#d4e6f1','#d5f5e3'
+];
+
+// Schedule a treemap re-render (debounced via rAF)
+function _peScheduleRender() {
+    if (_peRenderScheduled) return;
+    _peRenderScheduled = true;
+    requestAnimationFrame(() => {
+        _peRenderScheduled = false;
+        const agg = window._paramExplorerAgg;
+        const modal = document.getElementById('paramExplorerModal');
+        if (!agg || !modal || modal.style.display === 'none') return;
+        if (paramExplorerZoomState) return;   // don't clobber active zoom
+        const treemapDiv = document.getElementById('paramExplorerTreemap');
+        if (treemapDiv) _peRenderOverview(agg, treemapDiv, /*loading=*/true);
+    });
+}
 
 async function openParameterExplorer() {
     if (selectedEgIds.size === 0) return;
 
-    const modal    = document.getElementById('paramExplorerModal');
-    const loading  = document.getElementById('paramExplorerLoading');
-    const progress = document.getElementById('paramExplorerProgress');
-    const subtitle = document.getElementById('paramExplorerSubtitle');
+    const modal      = document.getElementById('paramExplorerModal');
+    const loading    = document.getElementById('paramExplorerLoading');
+    const progress   = document.getElementById('paramExplorerProgress');
+    const subtitle   = document.getElementById('paramExplorerSubtitle');
     const treemapDiv = document.getElementById('paramExplorerTreemap');
     const searchInput = document.getElementById('paramExplorerSearch');
+    const backBtn     = document.getElementById('paramExplorerBackBtn');
 
     modal.style.display = 'flex';
     loading.style.display = 'flex';
-    treemapDiv.innerHTML = '';
+    treemapDiv.innerHTML  = '';
+    paramExplorerZoomState = null;
+    window._paramExplorerAgg = null;
     if (searchInput) searchInput.value = '';
+    if (backBtn)     backBtn.style.display = 'none';
 
     const selectedFiles = (example1State.fileSummary || []).filter(f => selectedEgIds.has(f.egId));
     const n = selectedFiles.length;
     subtitle.textContent = `${n} file${n !== 1 ? 's' : ''} — loading…`;
 
-    const region = example1State.region;
-    const isV1   = example1State.version === 'v1';
+    const region  = example1State.region;
+    const isV1    = example1State.version === 'v1';
     const dataKey = isV1 ? 'elementsByElementGroupAtVersion' : 'elementsByElementGroup';
 
     const gqlQuery = isV1
         ? `query GetElsWithProps($elementGroupId: ID!, $pagination: PaginationInput) {
             elementsByElementGroupAtVersion(elementGroupId: $elementGroupId, versionNumber: 1, pagination: $pagination) {
                 pagination { cursor }
-                results {
-                    id
-                    properties(pagination: { limit: 200 }) { results { name value } }
-                }
+                results { properties(pagination: { limit: 200 }) { results { name value } } }
             }
         }`
         : `query GetElsWithProps($elementGroupId: ID!, $pagination: PaginationInput) {
             elementsByElementGroup(elementGroupId: $elementGroupId, pagination: $pagination) {
                 pagination { cursor }
-                results {
-                    id
-                    properties(pagination: { limit: 200 }) { results { name value } }
-                }
+                results { properties(pagination: { limit: 200 }) { results { name value } } }
             }
         }`;
 
     // aggregated: paramName → value → { count, categories: Set, files: Set }
     const agg = new Map();
+    window._paramExplorerAgg = agg;
 
     let filesDone = 0;
-    for (const f of selectedFiles) {
-        filesDone++;
-        let cursor = null;
-        let page = 0;
+
+    const processFile = async (f) => {
+        let cursor = null, page = 0;
         do {
             page++;
-            progress.textContent = `File ${filesDone} / ${n}: "${f.egName}"  —  page ${page}…`;
+            if (modal.style.display === 'none') return;   // modal was closed
             try {
                 const result = await executeGraphQLQuery(gqlQuery, {
                     elementGroupId: f.egId,
-                    pagination: cursor ? { cursor, limit: 100 } : { limit: 100 }
+                    pagination: cursor ? { cursor, limit: 200 } : { limit: 200 }
                 }, region);
                 const data = result.data?.[dataKey];
-                const els  = data?.results || [];
-
-                for (const el of els) {
+                for (const el of (data?.results || [])) {
                     const props = el.properties?.results || [];
-                    // Derive element's Revit category from its "Category" property
-                    const catProp   = props.find(p => p.name === 'Category');
-                    const elCategory = catProp?.value || '—';
-
+                    const elCat = (props.find(p => p.name === 'Category')?.value) || '—';
                     for (const prop of props) {
                         const raw = prop.value;
                         if (raw == null || String(raw).trim() === '') continue;
@@ -2881,48 +2898,120 @@ async function openParameterExplorer() {
                         const value     = String(raw).length > 120
                             ? String(raw).slice(0, 120) + '…'
                             : String(raw);
-
                         if (!agg.has(paramName)) agg.set(paramName, new Map());
                         const byValue = agg.get(paramName);
                         if (!byValue.has(value)) byValue.set(value, { count: 0, categories: new Set(), files: new Set() });
                         const entry = byValue.get(value);
                         entry.count++;
-                        entry.categories.add(elCategory);
+                        entry.categories.add(elCat);
                         entry.files.add(f.egName);
                     }
                 }
                 cursor = data?.pagination?.cursor || null;
             } catch (err) {
-                logDebug(`paramExplorer: ${f.egName} page ${page}: ${err.message}`);
+                logDebug(`paramExplorer: ${f.egName} p${page}: ${err.message}`);
                 cursor = null;
             }
         } while (cursor);
+
+        filesDone++;
+        progress.textContent = `${filesDone} / ${n} files loaded — ${agg.size} parameters found`;
+        _peScheduleRender();
+    };
+
+    // Process 3 files in parallel
+    const CONCURRENCY = 3;
+    for (let i = 0; i < selectedFiles.length; i += CONCURRENCY) {
+        if (modal.style.display === 'none') break;
+        await Promise.all(selectedFiles.slice(i, i + CONCURRENCY).map(processFile));
     }
 
+    if (modal.style.display === 'none') return;
     loading.style.display = 'none';
     subtitle.textContent  = `${n} file${n !== 1 ? 's' : ''} · ${agg.size} parameters`;
-    renderParamExplorerTreemap(agg, treemapDiv);
+    _peRenderOverview(agg, treemapDiv, /*loading=*/false);
 }
 
 function closeParameterExplorer() {
     const modal = document.getElementById('paramExplorerModal');
     if (modal) modal.style.display = 'none';
     if (paramExplorerTooltip) paramExplorerTooltip.style.display = 'none';
+    paramExplorerZoomState = null;
 }
 
+// ── zoom in: click a parameter tile ──────────────────────────────────────────
+function paramExplorerZoomIn(paramName) {
+    const agg = window._paramExplorerAgg;
+    if (!agg || !agg.has(paramName)) return;
+    paramExplorerZoomState = paramName;
+
+    const backBtn  = document.getElementById('paramExplorerBackBtn');
+    const subtitle = document.getElementById('paramExplorerSubtitle');
+    const search   = document.getElementById('paramExplorerSearch');
+    if (backBtn)  backBtn.style.display = '';
+    if (subtitle) subtitle.textContent  = `Parameter: ${paramName}`;
+    if (search)   search.value = '';
+
+    _peRenderZoom(agg.get(paramName), paramName, document.getElementById('paramExplorerTreemap'));
+}
+
+function paramExplorerZoomOut() {
+    paramExplorerZoomState = null;
+    const backBtn  = document.getElementById('paramExplorerBackBtn');
+    const subtitle = document.getElementById('paramExplorerSubtitle');
+    const search   = document.getElementById('paramExplorerSearch');
+    const agg      = window._paramExplorerAgg;
+    if (backBtn)  backBtn.style.display = 'none';
+    if (search)   search.value = '';
+    if (subtitle && agg) {
+        const n = (example1State.fileSummary || []).filter(f => selectedEgIds.has(f.egId)).length;
+        subtitle.textContent = `${n} file${n !== 1 ? 's' : ''} · ${agg.size} parameters`;
+    }
+    if (agg) _peRenderOverview(agg, document.getElementById('paramExplorerTreemap'), false);
+}
+
+// ── filter (works for both modes) ────────────────────────────────────────────
 function filterParamExplorerTreemap(query) {
     const svg  = document.querySelector('#paramExplorerTreemap svg');
     if (!svg) return;
     const term = query.trim().toLowerCase();
-    svg.querySelectorAll('g[data-paramname]').forEach(g => {
-        const name  = (g.getAttribute('data-paramname') || '').toLowerCase();
-        const match = !term || name.includes(term);
-        g.style.opacity = match ? '' : '0.07';
-    });
+    if (paramExplorerZoomState) {
+        // zoom mode: filter by value text
+        svg.querySelectorAll('g[data-peval]').forEach(g => {
+            const val = (g.getAttribute('data-peval') || '').toLowerCase();
+            g.style.opacity = (!term || val.includes(term)) ? '' : '0.07';
+        });
+    } else {
+        // overview: filter by parameter name
+        svg.querySelectorAll('g[data-paramname]').forEach(g => {
+            const name = (g.getAttribute('data-paramname') || '').toLowerCase();
+            g.style.opacity = (!term || name.includes(term)) ? '' : '0.07';
+        });
+    }
 }
 
-function renderParamExplorerTreemap(agg, container) {
-    // Sort params by total element count descending
+// ── shared tooltip helper ─────────────────────────────────────────────────────
+function _peShowTooltip(event, html) {
+    if (!paramExplorerTooltip) {
+        paramExplorerTooltip = document.createElement('div');
+        paramExplorerTooltip.style.cssText = [
+            'position:fixed','background:rgba(0,0,0,0.9)','color:white',
+            'padding:10px 14px','border-radius:6px','font-size:12px',
+            'max-width:380px','pointer-events:none','z-index:9999','line-height:1.6'
+        ].join(';');
+        document.body.appendChild(paramExplorerTooltip);
+    }
+    paramExplorerTooltip.innerHTML = html;
+    paramExplorerTooltip.style.left    = (event.clientX + 16) + 'px';
+    paramExplorerTooltip.style.top     = (event.clientY + 12) + 'px';
+    paramExplorerTooltip.style.display = 'block';
+}
+function _peHideTooltip() {
+    if (paramExplorerTooltip) paramExplorerTooltip.style.display = 'none';
+}
+
+// ── overview treemap (root → param → value) ───────────────────────────────────
+function _peRenderOverview(agg, container, isLive) {
     const params = [];
     agg.forEach((byValue, paramName) => {
         let total = 0;
@@ -2932,48 +3021,36 @@ function renderParamExplorerTreemap(agg, container) {
     params.sort((a, b) => b.total - a.total);
 
     if (params.length === 0) {
-        container.innerHTML = '<div style="padding:40px;text-align:center;color:#999;">No parameters found in selected files.</div>';
+        container.innerHTML = '<div style="padding:40px;text-align:center;color:#999;">No parameters found yet…</div>';
         return;
     }
 
-    // Build D3 hierarchy: Root → paramName (depth 1) → value (depth 2, leaf)
+    const color = d3.scaleOrdinal()
+        .domain(params.map(p => p.paramName))
+        .range(_PE_PALETTE);
+
     const data = {
         name: 'Parameters',
         children: params.map(({ paramName, byValue }) => ({
             name: paramName,
             children: Array.from(byValue.entries())
                 .map(([value, entry]) => ({
-                    name:       value,
-                    value:      entry.count,
-                    paramName,
+                    name: value, value: entry.count, paramName,
                     categories: [...entry.categories].sort(),
-                    files:      [...entry.files].sort()
+                    files: [...entry.files].sort()
                 }))
                 .sort((a, b) => b.value - a.value)
         }))
     };
 
-    const PARAM_PALETTE = [
-        '#aed6f1','#a9dfbf','#f9e79f','#f5cba7','#d2b4de',
-        '#a3d8d8','#f1948a','#abebc6','#fad7a0','#c9cfe8',
-        '#d7dbdd','#f7dc6f','#82e0aa','#85c1e9','#c39bd3',
-        '#f0b27a','#76d7c4','#ec7063','#d4e6f1','#d5f5e3'
-    ];
-    const color = d3.scaleOrdinal()
-        .domain(params.map(p => p.paramName))
-        .range(PARAM_PALETTE);
-
     const width       = Math.max(600, (container.clientWidth || 1100) - 4);
     const totalLeaves = params.reduce((s, p) => s + p.byValue.size, 0);
     const height      = Math.max(600, Math.min(3000, totalLeaves * 26 + params.length * 28));
 
-    const root = d3.hierarchy(data)
-        .sum(d => d.value || 0)
-        .sort((a, b) => b.value - a.value);
-
+    const root = d3.hierarchy(data).sum(d => d.value || 0).sort((a, b) => b.value - a.value);
     d3.treemap()
         .size([width, height])
-        .paddingTop(d  => d.depth === 0 ? 0 : d.depth === 1 ? 22 : 16)
+        .paddingTop(d  => d.depth === 0 ? 0 : d.depth === 1 ? 22 : 0)
         .paddingRight( d => d.depth >= 1 ? 3 : 0)
         .paddingBottom(d => d.depth >= 1 ? 3 : 0)
         .paddingLeft(  d => d.depth >= 1 ? 3 : 0)
@@ -2985,22 +3062,18 @@ function renderParamExplorerTreemap(agg, container) {
         .join('g')
         .attr('transform', d => `translate(${d.x0},${d.y0})`);
 
-    // Tag depth-1 groups for filter
     node.filter(d => d.depth === 1).attr('data-paramname', d => d.data.name);
 
     node.append('rect')
         .attr('width',  d => Math.max(0, d.x1 - d.x0))
         .attr('height', d => Math.max(0, d.y1 - d.y0))
-        .attr('fill', d => {
-            if (d.depth === 0) return 'transparent';
-            return color(d.depth === 1 ? d.data.name : d.data.paramName);
-        })
-        .attr('opacity', d => d.depth === 1 ? 0.32 : 0.88)
+        .attr('fill', d => d.depth === 0 ? 'transparent' : color(d.depth === 1 ? d.data.name : d.data.paramName))
+        .attr('opacity', d => d.depth === 1 ? 0.28 : 0.88)
         .attr('stroke', 'white')
         .attr('stroke-width', d => d.depth === 1 ? 2 : 1)
         .attr('rx', d => d.depth <= 1 ? 4 : 2);
 
-    // Parameter name labels (depth 1)
+    // Depth-1 parameter header — clickable to zoom in
     node.filter(d => d.depth === 1).each(function(d) {
         const w = d.x1 - d.x0, h = d.y1 - d.y0;
         if (w < 22 || h < 16) return;
@@ -3008,62 +3081,174 @@ function renderParamExplorerTreemap(agg, container) {
         const label    = d.data.name.length > maxChars ? d.data.name.slice(0, maxChars - 1) + '…' : d.data.name;
         d3.select(this).append('text')
             .attr('x', 5).attr('y', 15)
-            .text(label)
+            .text(label + (w > 120 ? '  ⊕' : ''))
             .attr('font-size', '11px').attr('fill', '#111').attr('font-weight', '700')
             .style('pointer-events', 'none');
     });
+    node.filter(d => d.depth === 1)
+        .style('cursor', 'zoom-in')
+        .on('click', (event, d) => { event.stopPropagation(); paramExplorerZoomIn(d.data.name); })
+        .on('mousemove', (event, d) => {
+            _peShowTooltip(event,
+                `<div style="font-weight:700;margin-bottom:3px;">${d.data.name}</div>` +
+                `<div style="opacity:.8">Click to zoom in and explore values</div>` +
+                `<div><span style="opacity:.7">Distinct values:</span> ${d.data.byValue ? d.data.byValue.size : d.children?.length}</div>`
+            );
+        })
+        .on('mouseout', _peHideTooltip);
 
-    // Value labels (depth 2 leaves)
+    // Depth-2 leaves (values)
     node.filter(d => d.depth === 2).each(function(d) {
         const w = d.x1 - d.x0, h = d.y1 - d.y0;
         if (w < 16 || h < 12) return;
-        const g        = d3.select(this);
+        const g = d3.select(this);
         const maxChars = Math.max(3, Math.floor(w / 6.5));
-        const label    = (d.data.name || '').length > maxChars
+        const label = (d.data.name || '').length > maxChars
             ? (d.data.name || '').slice(0, maxChars - 1) + '…'
             : (d.data.name || '');
-        g.append('text')
-            .attr('x', 4).attr('y', 13)
+        g.append('text').attr('x', 4).attr('y', 13)
             .text(label)
             .attr('font-size', '10px').attr('fill', '#111').attr('font-weight', '600')
             .style('pointer-events', 'none');
         if (h >= 26 && d.data.value > 0) {
-            g.append('text')
-                .attr('x', 4).attr('y', 24)
+            g.append('text').attr('x', 4).attr('y', 24)
                 .text(`${d.data.value.toLocaleString()}×`)
                 .attr('font-size', '9px').attr('fill', '#333')
                 .style('pointer-events', 'none');
         }
     });
-
-    // Tooltip on leaf hover
     node.filter(d => d.depth === 2)
         .style('cursor', 'default')
-        .on('mousemove', function(event, d) {
-            if (!paramExplorerTooltip) {
-                paramExplorerTooltip = document.createElement('div');
-                paramExplorerTooltip.style.cssText = [
-                    'position:fixed', 'background:rgba(0,0,0,0.9)', 'color:white',
-                    'padding:10px 14px', 'border-radius:6px', 'font-size:12px',
-                    'max-width:360px', 'pointer-events:none', 'z-index:9999', 'line-height:1.6'
-                ].join(';');
-                document.body.appendChild(paramExplorerTooltip);
-            }
-            const cats  = (d.data.categories || []).join(', ') || '—';
-            const files = (d.data.files || []).join(', ') || '—';
-            paramExplorerTooltip.innerHTML =
+        .on('mousemove', (event, d) => {
+            _peShowTooltip(event,
                 `<div style="font-weight:700;font-size:13px;margin-bottom:4px;">${d.data.paramName}</div>` +
                 `<div><span style="opacity:.7">Value:</span> <strong>${d.data.name}</strong></div>` +
                 `<div><span style="opacity:.7">Elements:</span> <strong>${d.data.value.toLocaleString()}</strong></div>` +
-                `<div><span style="opacity:.7">Categories:</span> ${cats}</div>` +
-                `<div><span style="opacity:.7">Files:</span> ${files}</div>`;
-            paramExplorerTooltip.style.left    = (event.clientX + 16) + 'px';
-            paramExplorerTooltip.style.top     = (event.clientY + 12) + 'px';
-            paramExplorerTooltip.style.display = 'block';
+                `<div><span style="opacity:.7">Categories:</span> ${(d.data.categories || []).join(', ') || '—'}</div>` +
+                `<div><span style="opacity:.7">Files:</span> ${(d.data.files || []).join(', ') || '—'}</div>`
+            );
         })
-        .on('mouseout', function() {
-            if (paramExplorerTooltip) paramExplorerTooltip.style.display = 'none';
+        .on('mouseout', _peHideTooltip);
+
+    // Live-load indicator
+    if (isLive) {
+        svg.append('text')
+            .attr('x', width - 6).attr('y', 14)
+            .attr('text-anchor', 'end')
+            .text('⟳ loading…')
+            .attr('font-size', '10px').attr('fill', '#999').attr('font-style', 'italic');
+    }
+
+    container.innerHTML = '';
+    container.appendChild(svg.node());
+}
+
+// ── zoom treemap (flat: root → values for one parameter) ─────────────────────
+function _peRenderZoom(byValue, paramName, container) {
+    const values = Array.from(byValue.entries())
+        .map(([value, entry]) => ({
+            value, count: entry.count,
+            categories: [...entry.categories].sort(),
+            files: [...entry.files].sort()
+        }))
+        .sort((a, b) => b.count - a.count);
+
+    if (values.length === 0) {
+        container.innerHTML = '<div style="padding:40px;text-align:center;color:#999;">No values found.</div>';
+        return;
+    }
+
+    // Color by category of each value
+    const allCats = [...new Set(values.flatMap(v => v.categories))].sort();
+    const catColor = d3.scaleOrdinal().domain(allCats).range(_PE_PALETTE);
+
+    const data = {
+        name: paramName,
+        children: values.map(v => ({
+            name: v.value, value: v.count,
+            categories: v.categories, files: v.files
+        }))
+    };
+
+    const width  = Math.max(600, (container.clientWidth || 1100) - 4);
+    const height = Math.max(500, Math.min(2400, values.length * 40 + 40));
+
+    const root = d3.hierarchy(data).sum(d => d.value || 0).sort((a, b) => b.value - a.value);
+    d3.treemap()
+        .size([width, height])
+        .paddingInner(3)
+        .paddingOuter(6)
+        .round(true)(root);
+
+    const svg  = d3.create('svg').attr('width', width).attr('height', height);
+    const node = svg.selectAll('g')
+        .data(root.leaves())
+        .join('g')
+        .attr('transform', d => `translate(${d.x0},${d.y0})`)
+        .attr('data-peval', d => d.data.name)
+        .style('cursor', 'default');
+
+    node.append('rect')
+        .attr('width',  d => Math.max(0, d.x1 - d.x0))
+        .attr('height', d => Math.max(0, d.y1 - d.y0))
+        .attr('fill', d => catColor(d.data.categories?.[0] || '—'))
+        .attr('opacity', 0.88)
+        .attr('stroke', 'white')
+        .attr('stroke-width', 1)
+        .attr('rx', 3);
+
+    node.each(function(d) {
+        const w = d.x1 - d.x0, h = d.y1 - d.y0;
+        if (w < 16 || h < 14) return;
+        const g = d3.select(this);
+        const maxChars = Math.max(4, Math.floor(w / 7));
+        const label = d.data.name.length > maxChars ? d.data.name.slice(0, maxChars - 1) + '…' : d.data.name;
+
+        g.append('text').attr('x', 6).attr('y', 15)
+            .text(label)
+            .attr('font-size', '11px').attr('fill', '#111').attr('font-weight', '700')
+            .style('pointer-events', 'none');
+
+        if (h >= 30) {
+            g.append('text').attr('x', 6).attr('y', 28)
+                .text(`${d.data.count.toLocaleString()} element${d.data.count !== 1 ? 's' : ''}`)
+                .attr('font-size', '9px').attr('fill', '#333')
+                .style('pointer-events', 'none');
+        }
+        if (h >= 44 && d.data.categories?.length) {
+            const catLabel = d.data.categories.slice(0, 3).join(', ') + (d.data.categories.length > 3 ? '…' : '');
+            const maxCatChars = Math.max(4, Math.floor(w / 6.5));
+            g.append('text').attr('x', 6).attr('y', 40)
+                .text(catLabel.length > maxCatChars ? catLabel.slice(0, maxCatChars - 1) + '…' : catLabel)
+                .attr('font-size', '9px').attr('fill', '#555').attr('font-style', 'italic')
+                .style('pointer-events', 'none');
+        }
+    });
+
+    node.on('mousemove', (event, d) => {
+        _peShowTooltip(event,
+            `<div style="font-weight:700;font-size:13px;margin-bottom:4px;">${paramName}</div>` +
+            `<div><span style="opacity:.7">Value:</span> <strong>${d.data.name}</strong></div>` +
+            `<div><span style="opacity:.7">Elements:</span> <strong>${d.data.count.toLocaleString()}</strong></div>` +
+            `<div><span style="opacity:.7">Categories:</span> ${d.data.categories.join(', ') || '—'}</div>` +
+            `<div><span style="opacity:.7">Files:</span> ${d.data.files.join(', ') || '—'}</div>`
+        );
+    }).on('mouseout', _peHideTooltip);
+
+    // Legend (categories)
+    if (allCats.length > 0) {
+        const legendG = svg.append('g').attr('transform', `translate(4,${height - 18})`);
+        let x = 0;
+        allCats.slice(0, 10).forEach(cat => {
+            if (x > width - 10) return;
+            legendG.append('rect').attr('x', x).attr('y', 0)
+                .attr('width', 10).attr('height', 10)
+                .attr('fill', catColor(cat)).attr('rx', 2);
+            legendG.append('text').attr('x', x + 13).attr('y', 9)
+                .text(cat).attr('font-size', '9px').attr('fill', '#444');
+            x += Math.min(cat.length * 6.5 + 22, 180);
         });
+    }
 
     container.innerHTML = '';
     container.appendChild(svg.node());

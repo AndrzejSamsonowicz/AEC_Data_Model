@@ -481,11 +481,18 @@ query CountEls($elementGroupId: ID!, $filter: ElementFilterInput, $pagination: P
     <div id="paramExplorerModal" style="display:none;">
         <div id="paramExplorerContent">
             <div id="paramExplorerHeader">
-                <div style="flex:0 0 auto;">
-                    <h2>&#128202; Parameter Explorer</h2>
-                    <span id="paramExplorerSubtitle"></span>
+                <div style="flex:0 0 auto;display:flex;align-items:center;gap:10px;">
+                    <button id="paramExplorerBackBtn" onclick="paramExplorerZoomOut()"
+                        style="display:none;background:rgba(255,255,255,0.18);border:1px solid rgba(255,255,255,0.4);
+                               color:white;padding:3px 10px;border-radius:4px;cursor:pointer;font-size:12px;white-space:nowrap;">
+                        &#8592; All Parameters
+                    </button>
+                    <div>
+                        <h2>&#128202; Parameter Explorer</h2>
+                        <span id="paramExplorerSubtitle"></span>
+                    </div>
                 </div>
-                <input id="paramExplorerSearch" type="text" placeholder="&#128269; Filter parameters&hellip;" oninput="filterParamExplorerTreemap(this.value)">
+                <input id="paramExplorerSearch" type="text" placeholder="&#128269; Filter&hellip;" oninput="filterParamExplorerTreemap(this.value)">
                 <button id="paramExplorerCloseBtn" onclick="closeParameterExplorer()">&times;</button>
             </div>
             <div id="paramExplorerBody">
