@@ -873,6 +873,58 @@ body {
     text-align: center;
     max-width: 450px;
 }
+
+/* ── Parameter Explorer — checklist phase ────────────────── */
+#peChecklist {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+}
+#peChecklistToolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    border-bottom: 1px solid #e0e0e0;
+    background: #f5f5f5;
+    flex-shrink: 0;
+}
+#peChecklistBody {
+    overflow-y: auto;
+    flex: 1;
+    padding: 6px 0;
+}
+.pe-param-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 16px;
+    cursor: pointer;
+    border-bottom: 1px solid #f0f0f0;
+    transition: background 0.1s;
+}
+.pe-param-row:hover { background: #e8f0fe; }
+.pe-param-row input[type=checkbox] {
+    width: 16px; height: 16px;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+.pe-param-name {
+    flex: 1;
+    font-size: 13px;
+    color: #222;
+    word-break: break-word;
+}
+.pe-param-files {
+    font-size: 11px;
+    color: #666;
+    background: #e8f0fe;
+    border-radius: 10px;
+    padding: 2px 8px;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
 /* ────────────────────────────────────────────────────────── */
 
 /* Viewer Modal Styles */

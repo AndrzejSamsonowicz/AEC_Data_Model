@@ -194,6 +194,7 @@ async function executeExample1() {
     document.getElementById('loadMoreBtn').style.display = 'none';
     selectedEgIds.clear();
     selectMode = false;
+    window._paramNamesCache = {};   // reset prefetch cache on new query
     const smBtn = document.getElementById('selectModeBtn');
     if (smBtn) { smBtn.style.display = 'none'; smBtn.classList.remove('active'); }
     updateViewerButton();
@@ -220,6 +221,38 @@ async function executeExample1() {
     } finally {
         document.getElementById('example1Loading').style.display = 'none';
     }
+}
+
+// ── Background param-name prefetch ────────────────────────────────────────────
+// Keyed by egId → Set<string>.  Populated in the background while the treemap
+// scans.  Never blocks the scan.
+window._paramNamesCache = window._paramNamesCache || {};
+
+const _propDefQuery = `
+    query GetPropDefs($elementGroupId: ID!, $pagination: PaginationInput) {
+        propertyDefinitionsByElementGroup(elementGroupId: $elementGroupId, pagination: $pagination) {
+            pagination { cursor }
+            results { name }
+        }
+    }`;
+
+async function _prefetchParamNames(egId, region) {
+    if (window._paramNamesCache[egId]) return;
+    window._paramNamesCache[egId] = new Set();
+    let cursor = null;
+    do {
+        try {
+            const r = await executeGraphQLQuery(_propDefQuery, {
+                elementGroupId: egId,
+                pagination: cursor ? { cursor, limit: 200 } : { limit: 200 }
+            }, region);
+            const data = r.data?.propertyDefinitionsByElementGroup;
+            for (const def of (data?.results || [])) {
+                if (def.name) window._paramNamesCache[egId].add(def.name);
+            }
+            cursor = data?.pagination?.cursor || null;
+        } catch (_) { cursor = null; }
+    } while (cursor);
 }
 
 // Latest mode: same per-file count pipeline as V1, but uses elementsByElementGroup (latest version, no versionNumber)
@@ -276,6 +309,7 @@ async function executeLatestQuery(hubId, category, region) {
                 // No category filter — list all files immediately, equal-size tiles
                 for (const eg of egs) {
                     fileSummary.push({ egId: eg.id, egName: eg.name, projectName: project.name, count: 1, hasMore: false, fileVersionUrn: eg.fileVersionUrn });
+                    _prefetchParamNames(eg.id, region);  // fire-and-forget
                 }
                 scanned += egs.length;
                 createTreemapVisualization([...fileSummary], 'All Files');
@@ -291,6 +325,7 @@ async function executeLatestQuery(hubId, category, region) {
                         const hasMore = !!(data?.pagination?.cursor);
                         if (count > 0) {
                             fileSummary.push({ egId: eg.id, egName: eg.name, projectName: project.name, count, hasMore, fileVersionUrn: eg.fileVersionUrn });
+                            _prefetchParamNames(eg.id, region);  // fire-and-forget
                             createTreemapVisualization([...fileSummary], category);
                             await new Promise(r => setTimeout(r, 0));
                         }
@@ -364,6 +399,7 @@ async function executeV1Query(hubId, category, region) {
         if (noCategory) {
             for (const eg of egs) {
                 fileSummary.push({ egId: eg.id, egName: eg.name, projectName: project.name, count: 1, hasMore: false, fileVersionUrn: eg.fileVersionUrn });
+                _prefetchParamNames(eg.id, region);  // fire-and-forget
             }
             scanned += egs.length;
             createTreemapVisualization([...fileSummary], 'All Files');
@@ -380,6 +416,7 @@ async function executeV1Query(hubId, category, region) {
                 const hasMore = !!(data?.pagination?.cursor);
                 if (count > 0) {
                     fileSummary.push({ egId: eg.id, egName: eg.name, projectName: project.name, count, hasMore, fileVersionUrn: eg.fileVersionUrn });
+                    _prefetchParamNames(eg.id, region);  // fire-and-forget
                     createTreemapVisualization([...fileSummary], category);
                     await new Promise(r => setTimeout(r, 0)); // yield for repaint
                 }
@@ -2846,105 +2883,209 @@ async function openParameterExplorer() {
     treemapDiv.innerHTML  = '';
     paramExplorerZoomState = null;
     window._paramExplorerAgg = null;
+    if (searchInput) { searchInput.style.display = 'none'; searchInput.value = ''; }
+    if (backBtn)     backBtn.style.display = 'none';
+
+    const selectedFiles = (example1State.fileSummary || []).filter(f => selectedEgIds.has(f.egId));
+    const n = selectedFiles.length;
+    subtitle.textContent = `${n} file${n !== 1 ? 's' : ''} — collecting parameter names…`;
+
+    const region = example1State.region;
+
+    // ── Phase 1: collect param names (use prefetch cache where ready, else fetch now) ──
+    // For any file not yet in the cache, fetch now (lightweight — names only)
+    const missing = selectedFiles.filter(f => !window._paramNamesCache[f.egId]);
+    if (missing.length > 0) {
+        let done = 0;
+        const CONCURRENCY = 4;
+        for (let i = 0; i < missing.length; i += CONCURRENCY) {
+            if (modal.style.display === 'none') return;
+            await Promise.all(missing.slice(i, i + CONCURRENCY).map(async f => {
+                await _prefetchParamNames(f.egId, region);
+                done++;
+                progress.textContent = `Collecting parameter names: ${done} / ${missing.length} files…`;
+            }));
+        }
+    }
+
+    if (modal.style.display === 'none') return;
+    loading.style.display = 'none';
+
+    // ── Phase 2: build aggregated param list across all selected files ────────
+    // paramName → Set of egIds that have it
+    const paramFileMap = new Map();
+    for (const f of selectedFiles) {
+        const names = window._paramNamesCache[f.egId] || new Set();
+        for (const name of names) {
+            if (!paramFileMap.has(name)) paramFileMap.set(name, new Set());
+            paramFileMap.get(name).add(f.egId);
+        }
+    }
+
+    const totalParams = paramFileMap.size;
+    subtitle.textContent = `${n} file${n !== 1 ? 's' : ''} · ${totalParams} parameters — select which to explore`;
+
+    // Render the checklist
+    _peRenderChecklist(paramFileMap, selectedFiles, treemapDiv);
+    if (searchInput) searchInput.style.display = '';
+}
+
+function _peRenderChecklist(paramFileMap, selectedFiles, container) {
+    // Sort: params present in most files first, then alphabetically
+    const params = Array.from(paramFileMap.entries())
+        .map(([name, egIds]) => ({ name, fileCount: egIds.size }))
+        .sort((a, b) => b.fileCount - a.fileCount || a.name.localeCompare(b.name));
+
+    const n = selectedFiles.length;
+
+    container.innerHTML = `
+        <div id="peChecklist">
+            <div id="peChecklistToolbar">
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+                    <input type="checkbox" id="peSelectAll" onchange="_peToggleAll(this.checked)">
+                    <span>Select all (${params.length})</span>
+                </label>
+                <span id="peSelectedCount" style="color:#1565c0;font-weight:600;">0 selected</span>
+                <button class="btn btn-execute" style="margin-left:auto;padding:7px 18px;"
+                    onclick="_peLoadCheckedValues()">
+                    Load Values &#8594;
+                </button>
+            </div>
+            <div id="peChecklistBody">
+                ${params.map(p => `
+                    <label class="pe-param-row">
+                        <input type="checkbox" class="pe-param-cb" value="${_peEsc(p.name)}"
+                            onchange="_peCountSelected()">
+                        <span class="pe-param-name">${_peEsc(p.name)}</span>
+                        <span class="pe-param-files">${p.fileCount === n ? 'all files' : `${p.fileCount} / ${n} files`}</span>
+                    </label>`).join('')}
+            </div>
+        </div>`;
+}
+
+function _peEsc(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function _peToggleAll(checked) {
+    document.querySelectorAll('.pe-param-cb').forEach(cb => { cb.checked = checked; });
+    _peCountSelected();
+}
+
+function _peCountSelected() {
+    const n = document.querySelectorAll('.pe-param-cb:checked').length;
+    const el = document.getElementById('peSelectedCount');
+    if (el) el.textContent = `${n} selected`;
+    const all = document.getElementById('peSelectAll');
+    if (all) {
+        const total = document.querySelectorAll('.pe-param-cb').length;
+        all.indeterminate = n > 0 && n < total;
+        all.checked = n === total;
+    }
+}
+
+// filter search on checklist
+function filterParamExplorerTreemap(query) {
+    const term = query.trim().toLowerCase();
+    // checklist mode
+    const rows = document.querySelectorAll('.pe-param-row');
+    if (rows.length > 0) {
+        rows.forEach(row => {
+            const name = (row.querySelector('.pe-param-name')?.textContent || '').toLowerCase();
+            row.style.display = (!term || name.includes(term)) ? '' : 'none';
+        });
+        return;
+    }
+    // treemap mode
+    const svg = document.querySelector('#paramExplorerTreemap svg');
+    if (!svg) return;
+    if (paramExplorerZoomState) {
+        svg.querySelectorAll('g[data-peval]').forEach(g => {
+            const val = (g.getAttribute('data-peval') || '').toLowerCase();
+            g.style.opacity = (!term || val.includes(term)) ? '' : '0.07';
+        });
+    } else {
+        svg.querySelectorAll('g[data-paramname]').forEach(g => {
+            const name = (g.getAttribute('data-paramname') || '').toLowerCase();
+            g.style.opacity = (!term || name.includes(term)) ? '' : '0.07';
+        });
+    }
+}
+
+async function _peLoadCheckedValues() {
+    const checked = [...document.querySelectorAll('.pe-param-cb:checked')].map(cb => cb.value);
+    if (checked.length === 0) { alert('Please select at least one parameter.'); return; }
+
+    const modal     = document.getElementById('paramExplorerModal');
+    const loading   = document.getElementById('paramExplorerLoading');
+    const progress  = document.getElementById('paramExplorerProgress');
+    const subtitle  = document.getElementById('paramExplorerSubtitle');
+    const treemapDiv = document.getElementById('paramExplorerTreemap');
+    const searchInput = document.getElementById('paramExplorerSearch');
+    const backBtn   = document.getElementById('paramExplorerBackBtn');
+
+    loading.style.display = 'flex';
+    treemapDiv.innerHTML  = '';
+    paramExplorerZoomState = null;
     if (searchInput) searchInput.value = '';
     if (backBtn)     backBtn.style.display = 'none';
 
     const selectedFiles = (example1State.fileSummary || []).filter(f => selectedEgIds.has(f.egId));
     const n = selectedFiles.length;
-    subtitle.textContent = `${n} file${n !== 1 ? 's' : ''} — loading…`;
-
-    const region  = example1State.region;
-    const isV1    = example1State.version === 'v1';
-    const dataKey = isV1 ? 'elementsByElementGroupAtVersion' : 'elementsByElementGroup';
-
-    const gqlQuery = isV1
-        ? `query GetElsWithProps($elementGroupId: ID!, $pagination: PaginationInput) {
-            elementsByElementGroupAtVersion(elementGroupId: $elementGroupId, versionNumber: 1, pagination: $pagination) {
-                pagination { cursor }
-                results { properties(pagination: { limit: 200 }) { results { name value } } }
-            }
-        }`
-        : `query GetElsWithProps($elementGroupId: ID!, $pagination: PaginationInput) {
-            elementsByElementGroup(elementGroupId: $elementGroupId, pagination: $pagination) {
-                pagination { cursor }
-                results { properties(pagination: { limit: 200 }) { results { name value } } }
-            }
-        }`;
+    const region = example1State.region;
 
     // aggregated: paramName → value → { count, categories: Set, files: Set }
     const agg = new Map();
     window._paramExplorerAgg = agg;
 
-    let filesDone = 0;
-
-    const processFile = async (f) => {
-        let cursor = null, page = 0;
-        let pageLimit = 50;   // start conservative; backs off further on 504
-        do {
-            page++;
-            if (modal.style.display === 'none') return;   // modal was closed
-            let attempt = 0;
-            let data = null;
-            while (attempt < 3) {
-                attempt++;
-                try {
-                    const result = await executeGraphQLQuery(gqlQuery, {
-                        elementGroupId: f.egId,
-                        pagination: cursor ? { cursor, limit: pageLimit } : { limit: pageLimit }
-                    }, region);
-                    data = result.data?.[dataKey];
-                    break;   // success
-                } catch (err) {
-                    const isTimeout = err.message.includes('504') || err.message.includes('timeout') || err.message.includes('Time-out');
-                    if (isTimeout && pageLimit > 10) {
-                        pageLimit = Math.max(10, Math.floor(pageLimit / 2));
-                        logDebug(`paramExplorer: ${f.egName} p${page} timeout — retrying with limit ${pageLimit}`);
-                    } else {
-                        logDebug(`paramExplorer: ${f.egName} p${page}: ${err.message}`);
-                        cursor = null;
-                        break;
-                    }
-                }
+    const distinctQuery = `
+        query GetDistinctByName($elementGroupId: ID!, $name: String!) {
+            distinctPropertyValuesInElementGroupByName(elementGroupId: $elementGroupId, name: $name) {
+                results { values(limit: 1000) { value count } }
             }
-            if (!data) break;
-            for (const el of (data?.results || [])) {
-                const props = el.properties?.results || [];
-                const elCat = (props.find(p => p.name === 'Category')?.value) || '—';
-                for (const prop of props) {
-                    const raw = prop.value;
-                    if (raw == null || String(raw).trim() === '') continue;
-                    const paramName = prop.name || '(unnamed)';
-                    const value     = String(raw).length > 120
-                        ? String(raw).slice(0, 120) + '…'
-                        : String(raw);
-                    if (!agg.has(paramName)) agg.set(paramName, new Map());
-                    const byValue = agg.get(paramName);
-                    if (!byValue.has(value)) byValue.set(value, { count: 0, categories: new Set(), files: new Set() });
-                    const entry = byValue.get(value);
-                    entry.count++;
-                    entry.categories.add(elCat);
+        }`;
+
+    // Build (file, paramName) work items
+    const workItems = [];
+    for (const f of selectedFiles) {
+        const cache = window._paramNamesCache[f.egId] || new Set();
+        for (const paramName of checked) {
+            if (cache.has(paramName)) workItems.push({ f, paramName });
+        }
+    }
+
+    let done = 0;
+    const CONCURRENCY = 6;
+    for (let i = 0; i < workItems.length; i += CONCURRENCY) {
+        if (modal.style.display === 'none') return;
+        await Promise.all(workItems.slice(i, i + CONCURRENCY).map(async ({ f, paramName }) => {
+            try {
+                const r = await executeGraphQLQuery(distinctQuery, { elementGroupId: f.egId, name: paramName }, region);
+                const vals = r.data?.distinctPropertyValuesInElementGroupByName?.results?.[0]?.values || [];
+                if (!agg.has(paramName)) agg.set(paramName, new Map());
+                const byValue = agg.get(paramName);
+                for (const { value, count } of vals) {
+                    if (value == null || String(value).trim() === '') continue;
+                    const v = String(value).length > 120 ? String(value).slice(0, 120) + '…' : String(value);
+                    if (!byValue.has(v)) byValue.set(v, { count: 0, categories: new Set(), files: new Set() });
+                    const entry = byValue.get(v);
+                    entry.count += count || 1;
                     entry.files.add(f.egName);
                 }
+            } catch (err) {
+                logDebug(`peLoadValues: ${f.egName}/${paramName}: ${err.message}`);
             }
-            cursor = data?.pagination?.cursor || null;
-        } while (cursor);
-
-        filesDone++;
-        progress.textContent = `${filesDone} / ${n} files loaded — ${agg.size} parameters found`;
-        _peScheduleRender();
-    };
-
-    // Process 2 files in parallel (3 caused 504 timeouts on large files)
-    const CONCURRENCY = 2;
-    for (let i = 0; i < selectedFiles.length; i += CONCURRENCY) {
-        if (modal.style.display === 'none') break;
-        await Promise.all(selectedFiles.slice(i, i + CONCURRENCY).map(processFile));
+            done++;
+            progress.textContent = `Loading values: ${done} / ${workItems.length}…`;
+            _peScheduleRender();
+        }));
     }
 
     if (modal.style.display === 'none') return;
     loading.style.display = 'none';
-    subtitle.textContent  = `${n} file${n !== 1 ? 's' : ''} · ${agg.size} parameters`;
-    _peRenderOverview(agg, treemapDiv, /*loading=*/false);
+    subtitle.textContent = `${n} file${n !== 1 ? 's' : ''} · ${checked.length} parameters`;
+    _peRenderOverview(agg, treemapDiv, false);
+    if (searchInput) searchInput.style.display = '';
 }
 
 function closeParameterExplorer() {
@@ -2983,26 +3124,6 @@ function paramExplorerZoomOut() {
         subtitle.textContent = `${n} file${n !== 1 ? 's' : ''} · ${agg.size} parameters`;
     }
     if (agg) _peRenderOverview(agg, document.getElementById('paramExplorerTreemap'), false);
-}
-
-// ── filter (works for both modes) ────────────────────────────────────────────
-function filterParamExplorerTreemap(query) {
-    const svg  = document.querySelector('#paramExplorerTreemap svg');
-    if (!svg) return;
-    const term = query.trim().toLowerCase();
-    if (paramExplorerZoomState) {
-        // zoom mode: filter by value text
-        svg.querySelectorAll('g[data-peval]').forEach(g => {
-            const val = (g.getAttribute('data-peval') || '').toLowerCase();
-            g.style.opacity = (!term || val.includes(term)) ? '' : '0.07';
-        });
-    } else {
-        // overview: filter by parameter name
-        svg.querySelectorAll('g[data-paramname]').forEach(g => {
-            const name = (g.getAttribute('data-paramname') || '').toLowerCase();
-            g.style.opacity = (!term || name.includes(term)) ? '' : '0.07';
-        });
-    }
 }
 
 // ── shared tooltip helper ─────────────────────────────────────────────────────
