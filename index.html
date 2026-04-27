@@ -23,7 +23,8 @@
         </div>
         <div class="header-right">
             <button class="btn btn-primary" onclick="openSettingsModal()">Settings</button>
-            <button class="btn btn-secondary" id="loginBtn" onclick="loginWithAutodesk()">Login With Autodesk</button>
+            <button class="btn btn-primary" id="loginBtn" onclick="loginWithAutodesk()">Login With Autodesk</button>
+            <button class="btn btn-primary" id="logoutBtn" style="display:none" onclick="logout()">Log Out</button>
         </div>
     </div>
 
@@ -45,105 +46,58 @@
         <div class="content-area" id="mainContainer">
             <!-- Example 1: Cross-Portfolio Element Search -->
             <div id="example1" class="example-content active">
-                <div class="example1-layout">
+                <!-- hidden project select (kept for JS compatibility) -->
+                <div style="display:none;">
+                    <select id="projectSelect" class="form-select">
+                        <option value="">Select Project...</option>
+                    </select>
+                </div>
 
-                    <!-- ── Left Sidebar ── -->
-                    <div class="example1-sidebar">
-                        <div>
-                            <h2 style="font-size:17px;color:#1a1a1a;margin:0 0 6px;font-weight:700;">Cross-Project Element Search</h2>
-                            <p style="color:#777;font-size:12px;line-height:1.5;margin:0;">Query elements across all projects &amp; models in a hub — no files need to be opened.</p>
-                        </div>
-
-                        <div class="sidebar-field">
-                            <label class="control-label">Hub</label>
-                            <div style="display:flex;gap:6px;">
-                                <select id="hubSelect" class="form-select" style="flex:1;min-width:0;">
-                                    <option value="">Select Hub...</option>
-                                </select>
-                                <button class="btn btn-primary" onclick="loadHubs()" title="Refresh Hubs" style="padding:8px 12px;flex-shrink:0;">↻</button>
-                            </div>
-                        </div>
-
-                        <!-- hidden project select (kept for JS compatibility) -->
-                        <div style="display:none;">
-                            <select id="projectSelect" class="form-select">
-                                <option value="">Select Project...</option>
-                            </select>
-                        </div>
-
-                        <div class="sidebar-field">
-                            <label class="control-label">Revit Category <span style="color:#999;font-weight:400;font-size:11px;">(optional)</span></label>
-                            <select id="categorySelect" class="form-select">
-                                <option value="">— All categories —</option>
-                                <option value="Air Terminals">Air Terminals</option>
-                                <option value="Ceilings">Ceilings</option>
-                                <option value="Doors">Doors</option>
-                                <option value="Ducts">Ducts</option>
-                                <option value="Furniture">Furniture</option>
-                                <option value="Generic Models">Generic Models</option>
-                                <option value="Mechanical Equipment">Mechanical Equipment</option>
-                                <option value="Pipes">Pipes</option>
-                                <option value="Plumbing Equipment">Plumbing Equipment</option>
-                                <option value="Rooms">Rooms</option>
-                                <option value="Spaces">Spaces</option>
-                                <option value="Structural Columns">Structural Columns</option>
-                                <option value="Structural Framing">Structural Framing</option>
-                                <option value="Walls">Walls</option>
-                                <option value="Windows">Windows</option>
-                            </select>
-                        </div>
-
-                        <button class="btn btn-execute" style="width:100%;" onclick="executeExample1()">
-                            <span class="btn-icon">▶</span> Execute Query
-                        </button>
-                        <button id="loadMoreBtn" class="btn btn-execute" onclick="loadMoreExample1()" style="display:none;background:#666;width:100%;">
-                            <span class="btn-icon">+</span> Load More Results
-                        </button>
-
-                        <div class="sidebar-divider"></div>
-                        <div class="sidebar-section-title">Compliance Check</div>
-
-                        <div class="sidebar-field">
-                            <label class="control-label" style="color:#1565c0;">Parameter Name</label>
-                            <input id="comp1ParamName" class="form-select" placeholder="e.g. Fire_Resistance_Rating">
-                        </div>
-                        <div class="sidebar-field">
-                            <label class="control-label" style="color:#1565c0;">Allowed Values <span style="color:#999;font-weight:400;font-size:11px;">(comma-separated)</span></label>
-                            <input id="comp1AllowedValues" class="form-select" placeholder="e.g. EI60,EI120">
-                        </div>
-                        <button class="btn btn-execute" style="width:100%;background:#1565c0;" onclick="executeExample1Compliance()">
-                            <span class="btn-icon">🔍</span> Check Compliance
-                        </button>
-                    </div>
-
-                    <!-- ── Right Main ── -->
-                    <div class="example1-main">
                 <div class="results-panel">
                     <div class="results-header">
-                        <h3>Results</h3>
-                        <div style="display:flex;align-items:center;gap:10px;">
-                            <div class="results-stats" id="example1Stats"></div>
-                            <button id="selectModeBtn" class="btn-select-mode" onclick="toggleSelectMode()" style="display:none;">&#9990; Select Files</button>
+                        <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0;flex-wrap:wrap;">
+                            <select id="hubSelect" class="form-select" style="flex:1;min-width:120px;max-width:280px;">
+                                <option value="">Select Hub...</option>
+                            </select>
+                            <button id="executeQueryBtn" class="btn btn-execute" onclick="executeExample1()" style="flex-shrink:0;">
+                                <span class="btn-icon">▶</span> Execute Query
+                            </button>
+                            <button id="loadMoreBtn" class="btn btn-execute" onclick="loadMoreExample1()" style="display:none;background:#666;flex-shrink:0;">
+                                <span class="btn-icon">+</span> Load More
+                            </button>
+                            <!-- Action bar: appears after query completes, replaces Execute Query -->
+                            <div id="queryActionBar" style="display:none;align-items:center;gap:8px;">
+                                <button class="btn-viewer-open" onclick="openParameterExplorer()">
+                                    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="flex-shrink:0"><rect x="0" y="8" width="4" height="8" rx="1"/><rect x="6" y="4" width="4" height="12" rx="1"/><rect x="12" y="1" width="4" height="15" rx="1"/></svg>
+                                    Explore Parameters
+                                </button>
+                                <button class="btn-viewer-open" onclick="showSelectionInViewer()">
+                                    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="flex-shrink:0"><path d="M8 3C4.5 3 1.5 5.5 0 8c1.5 2.5 4.5 5 8 5s6.5-2.5 8-5c-1.5-2.5-4.5-5-8-5zm0 8a3 3 0 1 1 0-6 3 3 0 0 1 0 6zm0-5a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg>
+                                    Show in Viewer
+                                </button>
+                                <button class="btn-clear-selection" onclick="clearTreemapSelection()">✕ Clear</button>
+                                <span id="treemapSelectionCount" style="white-space:nowrap;font-size:13px;color:#6a6a6a;">0 files selected</span>
+                            </div>
                         </div>
-                    </div>
-
-                    <div id="treemapSelectionBar" style="display:none;">
-                        <button class="btn-viewer-open" style="background:#1565c0;" onclick="openParameterExplorer()">&#128202; Explore Parameters</button>
-                        <button class="btn-viewer-open" onclick="showSelectionInViewer()">&#128065; Show in Viewer</button>
-                        <button class="btn-clear-selection" onclick="clearTreemapSelection()">&#x2715; Clear</button>
-                        <span id="treemapSelectionCount">0 files selected</span>
+                        <div class="results-stats" id="example1Stats" style="margin-left:12px;white-space:nowrap;"></div>
                     </div>
 
                     <div id="zoomSelectionBar" style="display:none;">
-                        <button class="btn-viewer-open" onclick="showZoomSelectionInViewer()">&#128065; Show in Viewer</button>
+                        <button class="btn-viewer-open" onclick="showZoomSelectionInViewer()">
+                            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="flex-shrink:0"><path d="M8 3C4.5 3 1.5 5.5 0 8c1.5 2.5 4.5 5 8 5s6.5-2.5 8-5c-1.5-2.5-4.5-5-8-5zm0 8a3 3 0 1 1 0-6 3 3 0 0 1 0 6zm0-5a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg>
+                            Show in Viewer
+                        </button>
                         <button class="btn-clear-selection" onclick="clearZoomSelection()">&#x2715; Clear</button>
                         <span id="zoomSelectionCount">0 elements selected</span>
                     </div>
                     
                     <div id="treemapSearchBar" style="display:none;margin-bottom:8px;">
-                        <input id="treemapSearchInput" type="text" placeholder="🔍 Filter files by name…"
+                        <input id="treemapSearchInput" type="text" placeholder="Filter files by name…"
                             oninput="filterTreemap(this.value)"
                             style="width:100%;box-sizing:border-box;padding:7px 12px;border:1px solid #d0d0d0;border-radius:6px;font-size:13px;outline:none;" />
+                        <div style="margin-top:5px;font-size:11px;color:#888;padding-left:2px;">
+                            Click a project header to zoom into it &nbsp;·&nbsp; <kbd style="background:#f2f4f6;border:1px solid #d5dbe1;border-radius:3px;padding:1px 5px;font-size:10px;">⇧</kbd>+click to select files for parameter analysis
+                        </div>
                     </div>
 
                     <div style="position: relative;">
@@ -165,8 +119,6 @@
                     </div>
 
                 </div><!-- /.results-panel -->
-                    </div><!-- /.example1-main -->
-                </div><!-- /.example1-layout -->
             </div><!-- /#example1 -->
 
             <!-- Example 2: Material Usage Analysis -->
@@ -488,7 +440,7 @@ query CountEls($elementGroupId: ID!, $filter: ElementFilterInput, $pagination: P
                         &#8592; All Parameters
                     </button>
                     <div>
-                        <h2>&#128202; Parameter Explorer</h2>
+                        <h2><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:middle;margin-right:7px;flex-shrink:0;opacity:0.9"><rect x="0" y="8" width="4" height="8" rx="1"/><rect x="6" y="4" width="4" height="12" rx="1"/><rect x="12" y="1" width="4" height="15" rx="1"/></svg>Parameter Explorer</h2>
                         <span id="paramExplorerSubtitle"></span>
                     </div>
                 </div>

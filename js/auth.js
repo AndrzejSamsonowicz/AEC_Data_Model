@@ -26,8 +26,9 @@ async function loadSettings() {
             sessionId = session;
             localStorage.setItem('apsSessionId', sessionId);
             document.getElementById('loginBtn').textContent = 'Logged In ✓';
-            document.getElementById('loginBtn').style.backgroundColor = '#4caf50';
+            document.getElementById('loginBtn').classList.replace('btn-secondary', 'btn-primary');
             document.getElementById('loginBtn').onclick = logout;
+            document.getElementById('logoutBtn').style.display = '';
             window.history.replaceState({}, document.title, window.location.pathname);
             // Load hubs if function is available
             if (typeof loadHubs === 'function') {
@@ -41,8 +42,9 @@ async function loadSettings() {
                     if (tokenResponse.ok) {
                         sessionId = savedSession;
                         document.getElementById('loginBtn').textContent = 'Logged In ✓';
-                        document.getElementById('loginBtn').style.backgroundColor = '#4caf50';
+                        document.getElementById('loginBtn').classList.replace('btn-secondary', 'btn-primary');
                         document.getElementById('loginBtn').onclick = logout;
+                        document.getElementById('logoutBtn').style.display = '';
                         // Load hubs if function is available
                         if (typeof loadHubs === 'function') {
                             setTimeout(() => loadHubs(), 100);
@@ -134,8 +136,9 @@ async function logout() {
     sessionId = null;
     localStorage.removeItem('apsSessionId');
     document.getElementById('loginBtn').textContent = 'Login With Autodesk';
-    document.getElementById('loginBtn').style.backgroundColor = '#0484bd';
+    document.getElementById('loginBtn').classList.replace('btn-primary', 'btn-primary');
     document.getElementById('loginBtn').onclick = loginWithAutodesk;
+    document.getElementById('logoutBtn').style.display = 'none';
     
     document.getElementById('mainContainer').innerHTML = `
         <div class="login-prompt">

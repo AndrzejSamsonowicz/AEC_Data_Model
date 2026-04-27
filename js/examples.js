@@ -48,7 +48,8 @@ let example1State = {
     totalLoaded: 0,
     projectMap: {},
     elementGroups: [],
-    version: 'latest'
+    version: 'latest',
+    projectFilter: null
 };
 
 // Zoom-in drill state
@@ -80,8 +81,9 @@ async function buildProjectElementGroupMap(hubId, region) {
     logDebug(`Pre-fetching element groups for ${projects.length} projects...`);
 
     const egQuery = `
-        query GetEGs($projectId: ID!) {
-            elementGroupsByProject(projectId: $projectId) {
+        query GetEGs($projectId: ID!, $pagination: PaginationInput) {
+            elementGroupsByProject(projectId: $projectId, pagination: $pagination) {
+                pagination { cursor }
                 results { id name alternativeIdentifiers { fileVersionUrn } }
             }
         }
@@ -95,16 +97,24 @@ async function buildProjectElementGroupMap(hubId, region) {
     for (let i = 0; i < projects.length; i += batchSize) {
         const batch = projects.slice(i, i + batchSize);
         await Promise.all(batch.map(async (project) => {
-            try {
-                const egResult = await executeGraphQLQuery(egQuery, { projectId: project.id }, region);
-                const egs = egResult.data?.elementGroupsByProject?.results || [];
-                egs.forEach(eg => {
-                    map[eg.id] = project.name;
-                    list.push({ id: eg.id, name: eg.name, projectName: project.name, fileVersionUrn: eg.alternativeIdentifiers?.fileVersionUrn || null });
-                });
-            } catch (err) {
-                logDebug(`Failed to get element groups for project ${project.name}:`, err.message);
-            }
+            let egCursor = null;
+            do {
+                try {
+                    const egResult = await executeGraphQLQuery(egQuery, {
+                        projectId: project.id,
+                        pagination: { limit: 100, ...(egCursor ? { cursor: egCursor } : {}) }
+                    }, region);
+                    const data = egResult.data?.elementGroupsByProject;
+                    (data?.results || []).forEach(eg => {
+                        map[eg.id] = project.name;
+                        list.push({ id: eg.id, name: eg.name, projectName: project.name, fileVersionUrn: eg.alternativeIdentifiers?.fileVersionUrn || null });
+                    });
+                    egCursor = data?.pagination?.cursor || null;
+                } catch (err) {
+                    logDebug(`Failed to get element groups for project ${project.name}:`, err.message);
+                    egCursor = null;
+                }
+            } while (egCursor);
         }));
         logDebug(`Project map progress: ${Math.min(i + batchSize, projects.length)}/${projects.length} projects scanned, ${list.length} models found`);
     }
@@ -164,7 +174,7 @@ async function fetchAllAtVersion1(elementGroups, category, region, onProgress) {
 async function executeExample1() {
     const hubSelect = document.getElementById('hubSelect');
     const hubId = hubSelect.value;
-    const category = document.getElementById('categorySelect').value;
+    const category = document.getElementById('categorySelect')?.value || '';
 
     if (!hubId) { alert('Please select a hub first'); return; }
 
@@ -182,8 +192,13 @@ async function executeExample1() {
         totalLoaded: 0,
         projectMap: {},
         elementGroups: [],
-        version
+        version,
+        projectFilter: null,
+        _queryBarShown: false
     };
+    // Restore action bar visibility for the new query
+    const _actionBar = document.getElementById('queryActionBar');
+    if (_actionBar) _actionBar.style.display = 'none';
 
     document.getElementById('example1Loading').style.display = 'flex';
     document.getElementById('example1Treemap').innerHTML = '';
@@ -194,7 +209,9 @@ async function executeExample1() {
     document.getElementById('loadMoreBtn').style.display = 'none';
     selectedEgIds.clear();
     selectMode = false;
-    window._paramNamesCache = {};   // reset prefetch cache on new query
+    window._paramNamesCache    = {};   // reset prefetch cache on new query
+    window._paramApiNameCache  = {};
+    window._paramNamesPromises = {};
     const smBtn = document.getElementById('selectModeBtn');
     if (smBtn) { smBtn.style.display = 'none'; smBtn.classList.remove('active'); }
     updateViewerButton();
@@ -224,9 +241,15 @@ async function executeExample1() {
 }
 
 // ── Background param-name prefetch ────────────────────────────────────────────
-// Keyed by egId → Set<string>.  Populated in the background while the treemap
-// scans.  Never blocks the scan.
-window._paramNamesCache = window._paramNamesCache || {};
+// _paramNamesCache   : egId → Set<string>  (display names, completed fetches)
+// _paramApiNameCache : egId → Map<displayName, apiName>
+//   Some Revit params appear with underscores in element data (Fire_Resistance_Rating)
+//   but the API's distinctPropertyValues / filter queries require spaces (Fire Resistance Rating).
+//   This map translates display → API name transparently.
+// _paramNamesPromises: egId → Promise<Set<string>>  (in-progress OR done)
+window._paramNamesCache    = window._paramNamesCache    || {};
+window._paramApiNameCache  = window._paramApiNameCache  || {};
+window._paramNamesPromises = window._paramNamesPromises || {};
 
 const _propDefQuery = `
     query GetPropDefs($elementGroupId: ID!, $pagination: PaginationInput) {
@@ -236,23 +259,94 @@ const _propDefQuery = `
         }
     }`;
 
-async function _prefetchParamNames(egId, region) {
-    if (window._paramNamesCache[egId]) return;
-    window._paramNamesCache[egId] = new Set();
-    let cursor = null;
-    do {
+// Sample query: first page of elements to catch params not in property definitions
+// (propertyDefinitionsByElementGroup only returns formally-registered defs;
+//  element-level properties like Fire_Resistance_Rating require sampling actual elements)
+const _elemSampleQuery = `
+    query SampleEls($elementGroupId: ID!, $pagination: PaginationInput) {
+        elementsByElementGroup(elementGroupId: $elementGroupId, pagination: $pagination) {
+            pagination { cursor }
+            results { properties(pagination: { limit: 500 }) { results { name } } }
+        }
+    }`;
+const _elemSampleQueryV1 = `
+    query SampleElsV1($elementGroupId: ID!, $pagination: PaginationInput) {
+        elementsByElementGroupAtVersion(elementGroupId: $elementGroupId, versionNumber: 1, pagination: $pagination) {
+            pagination { cursor }
+            results { properties(pagination: { limit: 500 }) { results { name } } }
+        }
+    }`;
+
+function _prefetchParamNames(egId, region) {
+    // Return existing promise (in-progress or resolved) — never double-fetch
+    if (window._paramNamesPromises[egId]) return window._paramNamesPromises[egId];
+
+    const isV1 = example1State.version === 'v1';
+
+    const promise = (async () => {
+        const names  = new Set();
+        const apiMap = new Map();   // displayName → apiName
+
+        // ── Part 1: property definitions (fast, paginated) ────────────────────
+        let cursor = null;
+        do {
+            try {
+                const r = await executeGraphQLQuery(_propDefQuery, {
+                    elementGroupId: egId,
+                    pagination: cursor ? { cursor, limit: 200 } : { limit: 200 }
+                }, region);
+                const data = r.data?.propertyDefinitionsByElementGroup;
+                for (const def of (data?.results || [])) {
+                    if (def.name) { names.add(def.name); apiMap.set(def.name, def.name); }
+                }
+                cursor = data?.pagination?.cursor || null;
+            } catch (_) { cursor = null; }
+        } while (cursor);
+
+        // ── Part 2: sample elements to catch informal properties ──────────────
+        // Some Revit parameters (e.g. Fire_Resistance_Rating) only appear on
+        // element data, not in the property definitions index.
+        // We paginate up to 3 pages of 100 elements (300 total) and stop early
+        // once a page adds no new names — giving good coverage without excess latency.
+        // IMPORTANT: The API's distinctPropertyValues and filter queries use the
+        // space-normalised name.  When an underscore name's spaces-version is
+        // already known from definitions, we keep the underscore display name but
+        // map it to the spaces API name so queries work correctly.
         try {
-            const r = await executeGraphQLQuery(_propDefQuery, {
-                elementGroupId: egId,
-                pagination: cursor ? { cursor, limit: 200 } : { limit: 200 }
-            }, region);
-            const data = r.data?.propertyDefinitionsByElementGroup;
-            for (const def of (data?.results || [])) {
-                if (def.name) window._paramNamesCache[egId].add(def.name);
+            const sampleQuery = isV1 ? _elemSampleQueryV1 : _elemSampleQuery;
+            const dataKey     = isV1 ? 'elementsByElementGroupAtVersion' : 'elementsByElementGroup';
+            let sampleCursor = null;
+            const MAX_SAMPLE_PAGES = 3;
+            for (let page = 0; page < MAX_SAMPLE_PAGES; page++) {
+                const r = await executeGraphQLQuery(sampleQuery, {
+                    elementGroupId: egId,
+                    pagination: sampleCursor ? { cursor: sampleCursor, limit: 100 } : { limit: 100 }
+                }, region);
+                const pageData = r.data?.[dataKey];
+                const results  = pageData?.results || [];
+                let newNamesFound = 0;
+                for (const el of results) {
+                    for (const p of (el.properties?.results || [])) {
+                        if (!p.name || names.has(p.name)) continue;
+                        const spacesVer = p.name.replace(/_/g, ' ');
+                        names.add(p.name);
+                        apiMap.set(p.name, names.has(spacesVer) ? spacesVer : p.name);
+                        newNamesFound++;
+                    }
+                }
+                sampleCursor = pageData?.pagination?.cursor || null;
+                // Stop only if there are no more pages
+                if (!sampleCursor) break;
             }
-            cursor = data?.pagination?.cursor || null;
-        } catch (_) { cursor = null; }
-    } while (cursor);
+        } catch (_) { /* non-fatal */ }
+
+        window._paramNamesCache[egId]   = names;
+        window._paramApiNameCache[egId] = apiMap;
+        return names;
+    })();
+
+    window._paramNamesPromises[egId] = promise;
+    return promise;
 }
 
 // Latest mode: same per-file count pipeline as V1, but uses elementsByElementGroup (latest version, no versionNumber)
@@ -268,8 +362,11 @@ async function executeLatestQuery(hubId, category, region) {
         : `Found ${projects.length} projects. Scanning for ${category}...`;
     document.getElementById('loadMoreBtn').style.display = 'none';
 
-    const egQuery = `query GetEGs($projectId: ID!) {
-        elementGroupsByProject(projectId: $projectId) { results { id name alternativeIdentifiers { fileVersionUrn } } }
+    const egQuery = `query GetEGs($projectId: ID!, $pagination: PaginationInput) {
+        elementGroupsByProject(projectId: $projectId, pagination: $pagination) {
+            pagination { cursor }
+            results { id name alternativeIdentifiers { fileVersionUrn } }
+        }
     }`;
     const countQuery = `query CountEls($elementGroupId: ID!, $filter: ElementFilterInput, $pagination: PaginationInput) {
         elementsByElementGroup(elementGroupId: $elementGroupId, filter: $filter, pagination: $pagination) {
@@ -293,15 +390,24 @@ async function executeLatestQuery(hubId, category, region) {
     for (let i = 0; i < projects.length; i += BATCH) {
         await Promise.all(projects.slice(i, i + BATCH).map(async (project) => {
             let egs = [];
-            try {
-                const r = await executeGraphQLQuery(egQuery, { projectId: project.id }, region);
-                egs = (r.data?.elementGroupsByProject?.results || []).map(eg => ({
-                    id: eg.id, name: eg.name, projectName: project.name,
-                    fileVersionUrn: eg.alternativeIdentifiers?.fileVersionUrn || null
-                }));
-            } catch (err) {
-                logDebug(`EG fetch failed for project ${project.name}: ${err.message.slice(0, 80)}`);
-            }
+            let egCursor = null;
+            do {
+                try {
+                    const r = await executeGraphQLQuery(egQuery, {
+                        projectId: project.id,
+                        pagination: { limit: 100, ...(egCursor ? { cursor: egCursor } : {}) }
+                    }, region);
+                    const data = r.data?.elementGroupsByProject;
+                    for (const eg of (data?.results || [])) {
+                        egs.push({ id: eg.id, name: eg.name, projectName: project.name,
+                            fileVersionUrn: eg.alternativeIdentifiers?.fileVersionUrn || null });
+                    }
+                    egCursor = data?.pagination?.cursor || null;
+                } catch (err) {
+                    logDebug(`EG fetch failed for project ${project.name}: ${err.message.slice(0, 80)}`);
+                    egCursor = null;
+                }
+            } while (egCursor);
 
             totalFiles += egs.length;
 
@@ -358,8 +464,11 @@ async function executeV1Query(hubId, category, region) {
         ? `Found ${projects.length} projects. Retrieving all Revit files…`
         : `Found ${projects.length} projects. Scanning for ${category}...`;
 
-    const egQuery = `query GetEGs($projectId: ID!) {
-        elementGroupsByProject(projectId: $projectId) { results { id name alternativeIdentifiers { fileVersionUrn } } }
+    const egQuery = `query GetEGs($projectId: ID!, $pagination: PaginationInput) {
+        elementGroupsByProject(projectId: $projectId, pagination: $pagination) {
+            pagination { cursor }
+            results { id name alternativeIdentifiers { fileVersionUrn } }
+        }
     }`;
     const countQuery = `query CountEls($elementGroupId: ID!, $filter: ElementFilterInput, $pagination: PaginationInput) {
         elementsByElementGroupAtVersion(elementGroupId: $elementGroupId, versionNumber: 1, filter: $filter, pagination: $pagination) {
@@ -384,15 +493,24 @@ async function executeV1Query(hubId, category, region) {
     for (let i = 0; i < projects.length; i += BATCH_V1) {
         await Promise.all(projects.slice(i, i + BATCH_V1).map(async (project) => {
         let egs = [];
-        try {
-            const r = await executeGraphQLQuery(egQuery, { projectId: project.id }, region);
-            egs = (r.data?.elementGroupsByProject?.results || []).map(eg => ({
-                id: eg.id, name: eg.name, projectName: project.name,
-                fileVersionUrn: eg.alternativeIdentifiers?.fileVersionUrn || null
-            }));
-        } catch (err) {
-            logDebug(`EG fetch failed for project ${project.name}: ${err.message.slice(0, 80)}`);
-        }
+        let egCursor = null;
+        do {
+            try {
+                const r = await executeGraphQLQuery(egQuery, {
+                    projectId: project.id,
+                    pagination: { limit: 100, ...(egCursor ? { cursor: egCursor } : {}) }
+                }, region);
+                const data = r.data?.elementGroupsByProject;
+                for (const eg of (data?.results || [])) {
+                    egs.push({ id: eg.id, name: eg.name, projectName: project.name,
+                        fileVersionUrn: eg.alternativeIdentifiers?.fileVersionUrn || null });
+                }
+                egCursor = data?.pagination?.cursor || null;
+            } catch (err) {
+                logDebug(`EG fetch failed for project ${project.name}: ${err.message.slice(0, 80)}`);
+                egCursor = null;
+            }
+        } while (egCursor);
 
         totalFiles += egs.length;
 
@@ -558,13 +676,35 @@ async function fetchExample1Batch(autoPaginate = false) {
 // Create D3 Treemap Visualization
 // fileSummary: [{egId, egName, projectName, count, hasMore}]
 function createTreemapVisualization(fileSummary, category) {
+    // On first render after a real query: swap Execute Query for action bar
+    if (!example1State._queryBarShown) {
+        example1State._queryBarShown = true;
+        const actionBar = document.getElementById('queryActionBar');
+        if (actionBar) actionBar.style.display = 'flex';
+    }
     const container = document.getElementById('example1Treemap');
     container.innerHTML = '';
 
-    const files = fileSummary.filter(f => f.count > 0);
+    // Project zoom: filter to a single project when active
+    const activeProjectFilter = example1State.projectFilter || null;
+    let files = fileSummary.filter(f => f.count > 0);
+    if (activeProjectFilter) files = files.filter(f => f.projectName === activeProjectFilter);
+
     if (files.length === 0) {
         container.innerHTML = '<div style="padding: 40px; text-align: center; color: #999;">No elements found</div>';
         return;
+    }
+
+    // Project breadcrumb when zoomed
+    if (activeProjectFilter) {
+        const crumb = document.createElement('div');
+        crumb.className = 'zoom-bar';
+        crumb.style.marginBottom = '8px';
+        crumb.innerHTML =
+            `<button class="btn-zoom-back" onclick="example1State.projectFilter=null;createTreemapVisualization(example1State.fileSummary,example1State.category)">← All Projects</button>` +
+            `<span style="font-weight:600;color:#3c3c3c;">${activeProjectFilter}</span>` +
+            `<span style="opacity:0.55;font-size:11px;">· click file to inspect · ⇧+click to select</span>`;
+        container.appendChild(crumb);
     }
 
     // Group: projectName → [fileSummary entries]
@@ -599,17 +739,22 @@ function createTreemapVisualization(fileSummary, category) {
     const width = Math.max(200, (container.clientWidth || 1000) - hPad);
     const projectNames = Object.keys(byProject);
 
-    // Count total leaf nodes (RVT files) to determine height needed
-    const totalLeaves = projectNames.reduce((sum, p) => sum + Object.keys(byProject[p]).length, 0);
-    const height = Math.max(520, Math.min(1400, totalLeaves * 80));
+    // Fit treemap to the visible viewport — no scrolling
+    const containerRect = container.getBoundingClientRect();
+    const height = Math.max(300, window.innerHeight - Math.max(containerRect.top, 60) - 20);
 
     // Light pastel palette — readable with black text
     const LIGHT_PALETTE = [
         '#aed6f1','#a9dfbf','#f9e79f','#f5cba7','#d2b4de',
         '#a3d8d8','#f1948a','#abebc6','#fad7a0','#c9cfe8'
     ];
+    // Always build the color scale from ALL project names (not the filtered subset)
+    // so that zoomed-in tiles keep the same colour they had in the overview.
+    const allProjectNames = Object.keys(
+        (example1State.fileSummary || []).reduce((acc, f) => { acc[f.projectName] = true; return acc; }, {})
+    );
     const color = d3.scaleOrdinal()
-        .domain(projectNames)
+        .domain(allProjectNames.length ? allProjectNames : projectNames)
         .range(LIGHT_PALETTE);
 
     const treemap = d3.treemap()
@@ -664,7 +809,7 @@ function createTreemapVisualization(fileSummary, category) {
         })
         .style('filter', d => d.data.egId && selectedEgIds.has(d.data.egId) ? 'drop-shadow(0 0 6px rgba(255,214,0,0.85))' : null)
         .attr('data-egid', d => d.depth === 3 ? d.data.egId : null)
-        .style('cursor', d => d.depth === 3 ? 'pointer' : 'default')
+        .style('cursor', d => d.depth === 1 ? 'zoom-in' : 'default')
         .on('mouseover', function(event, d) {
             if (d.depth === 3) {
                 if (!selectedEgIds.has(d.data.egId)) {
@@ -690,22 +835,37 @@ function createTreemapVisualization(fileSummary, category) {
         .attr('data-egid', d => d.data.egId)
         .attr('data-egname', d => d.data.name)
         .attr('data-projectname', d => d.data.projectName)
-        .style('cursor', 'pointer');
+        .style('cursor', 'default');
+
+    // Stamp project-zoom attribute onto depth-1 (project header) g nodes
+    node.filter(d => d.depth === 1)
+        .attr('data-projectzoom', d => d.data.name)
+        .style('cursor', 'zoom-in');
 
     // Project labels (depth 1)
-    node.filter(d => d.depth === 1)
-        .append('text')
-        .attr('x', 6)
-        .attr('y', 16)
-        .text(d => {
-            const w = d.x1 - d.x0;
-            const maxChars = Math.floor(w / 7);
-            return d.data.name.length > maxChars ? d.data.name.slice(0, maxChars - 1) + '…' : d.data.name;
-        })
-        .attr('font-size', '12px')
-        .attr('fill', '#1a1a1a')
-        .attr('font-weight', '700')
-        .style('pointer-events', 'none');
+    node.filter(d => d.depth === 1).each(function(d) {
+        const w = d.x1 - d.x0;
+        const g = d3.select(this);
+        const HINT_TEXT = 'click to zoom into project';
+        const HINT_W = HINT_TEXT.length * 6.5 + 16; // approx px width of hint
+        const maxChars = Math.floor((w - 12) / 7);
+        const label = d.data.name.length > maxChars ? d.data.name.slice(0, maxChars - 1) + '…' : d.data.name;
+        const labelPxW = label.length * 7 + 12;
+        g.append('text')
+            .attr('x', 6).attr('y', 16)
+            .text(label)
+            .attr('font-size', '12px').attr('fill', '#1a1a1a').attr('font-weight', '700')
+            .style('pointer-events', 'none');
+        // Show zoom hint only if there's room alongside the project name
+        if (w > 130 && !activeProjectFilter && (labelPxW + HINT_W) <= w) {
+            g.append('text')
+                .attr('x', w - 5).attr('y', 16)
+                .attr('text-anchor', 'end')
+                .text(HINT_TEXT)
+                .attr('font-size', '9px').attr('fill', '#555').attr('opacity', 0.55)
+                .style('pointer-events', 'none');
+        }
+    });
 
     // Category labels (depth 2)
     node.filter(d => d.depth === 2)
@@ -750,7 +910,7 @@ function createTreemapVisualization(fileSummary, category) {
             if (h >= 44) {
                 g.append('text')
                     .attr('x', 4).attr('y', h - 6)
-                    .text('click › inspect  |  ⇧ / Ctrl+click › select')
+                    .text('⇧+click › select')
                     .attr('font-size', '8px')
                     .attr('fill', 'rgba(0,0,0,0.4)')
                     .attr('font-style', 'italic')
@@ -770,7 +930,7 @@ function createTreemapVisualization(fileSummary, category) {
                 const egName = el.getAttribute('data-egname');
                 const projectName = el.getAttribute('data-projectname');
                 hideTooltip();
-                const isMultiSelect = selectMode || e.shiftKey || e.ctrlKey || e.metaKey;
+                const isMultiSelect = selectMode || e.shiftKey;
                 if (isMultiSelect) {
                     e.preventDefault();
                     const rect = el.querySelector('rect');
@@ -782,9 +942,15 @@ function createTreemapVisualization(fileSummary, category) {
                         if (rect) { rect.setAttribute('stroke', '#FFD600'); rect.setAttribute('stroke-width', '3'); rect.setAttribute('opacity', '1'); rect.style.filter = 'drop-shadow(0 0 6px rgba(255,214,0,0.85))'; }
                     }
                     updateViewerButton();
-                } else {
-                    zoomIntoFile(egId, egName, projectName).catch(err => console.error('zoomIntoFile error:', err));
                 }
+                // Plain click on a file tile intentionally does nothing
+                return;
+            }
+            // Project zoom: click on a project header band zooms into that project
+            const pzoom = el.getAttribute && el.getAttribute('data-projectzoom');
+            if (pzoom) {
+                example1State.projectFilter = pzoom;
+                createTreemapVisualization(fileSummary, category);
                 return;
             }
             el = el.parentElement;
@@ -889,7 +1055,7 @@ function showTooltip(event, d) {
         <div style="font-size:12px; opacity:0.85;">📁 <strong>Project:</strong> ${projectName}</div>
         <div style="font-size:12px; opacity:0.85;">🏷️ <strong>Category:</strong> ${categoryName}</div>
         <div style="font-size:12px; font-weight:600; margin-top:5px; color:#64b5f6;">🔢 ${(count > 1 || d.data.hasMore) ? `${count}${d.data.hasMore ? '+' : ''} element${count !== 1 ? 's' : ''}` : 'Revit file'}</div>
-        <div style="font-size:11px; opacity:0.6; margin-top:4px;">Click to inspect parameters</div>
+        <div style="font-size:11px; opacity:0.6; margin-top:4px;">&#x21e7;+click to select</div>
     `;
 
     tooltip.style.left = (event.clientX + 15) + 'px';
@@ -1565,18 +1731,10 @@ function showZoomSelectionInViewer() {
 // ─── Treemap multi-select → Viewer ───────────────────────────────────────────
 
 function updateViewerButton() {
-    const bar = document.getElementById('treemapSelectionBar');
     const countEl = document.getElementById('treemapSelectionCount');
-    if (!bar) return;
+    if (!countEl) return;
     const n = selectedEgIds.size;
-    if (n === 0) {
-        bar.style.display = 'none';
-    } else {
-        bar.style.display = 'flex';
-        countEl.textContent = `${n} file${n !== 1 ? 's' : ''} selected`;
-        // Scroll the bar into view in case the user has scrolled down past it
-        bar.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    }
+    countEl.textContent = `${n} file${n !== 1 ? 's' : ''} selected`;
 }
 
 function clearTreemapSelection() {
@@ -1586,6 +1744,21 @@ function clearTreemapSelection() {
     if (!zoomState.active && example1State.fileSummary?.length) {
         createTreemapVisualization(example1State.fileSummary, example1State.category);
     }
+}
+
+function _resetToNewQuery() {
+    // Show Execute Query, hide action bar, clear state
+    const execBtn = document.getElementById('executeQueryBtn');
+    const actionBar = document.getElementById('queryActionBar');
+    if (actionBar) actionBar.style.display = 'none';
+    selectedEgIds.clear();
+    selectMode = false;
+    example1State._queryBarShown = false;
+    document.getElementById('example1Treemap').innerHTML = '';
+    const sb = document.getElementById('treemapSearchBar');
+    if (sb) { sb.style.display = 'none'; }
+    document.getElementById('example1Stats').textContent = '';
+    document.getElementById('loadMoreBtn').style.display = 'none';
 }
 
 function toggleSelectMode() {
@@ -1656,7 +1829,7 @@ async function executeExample1Compliance() {
     const hubSelect = document.getElementById('hubSelect');
     const hubId    = hubSelect.value;
     const region   = hubSelect.options[hubSelect.selectedIndex]?.dataset.region || 'US';
-    const category = document.getElementById('categorySelect').value;
+    const category = document.getElementById('categorySelect')?.value || '';
     let   paramName     = (document.getElementById('comp1ParamName')?.value || '').trim();
     const allowedRaw    = (document.getElementById('comp1AllowedValues')?.value || '').trim();
     const panel         = document.getElementById('example1CompliancePanel');
@@ -1664,7 +1837,6 @@ async function executeExample1Compliance() {
     const treemapDiv    = document.getElementById('example1ComplianceTreemap');
 
     if (!hubId)      { alert('Please select a Hub first');              return; }
-    if (!category)   { alert('Please select a Revit Category first');   return; }
     if (!paramName)  { alert('Please enter a Parameter Name');          return; }
     if (!allowedRaw) { alert('Please enter at least one Allowed Value'); return; }
 
@@ -2843,7 +3015,7 @@ function renderExample5Treemap(container) {
 
 let paramExplorerTooltip = null;
 let paramExplorerZoomState = null;   // null = overview  |  string = zoomed paramName
-let _peRenderScheduled    = false;   // debounce flag for progressive render
+let _peRafId = null;   // cancellable rAF handle for progressive render
 
 const _PE_PALETTE = [
     '#aed6f1','#a9dfbf','#f9e79f','#f5cba7','#d2b4de',
@@ -2852,18 +3024,17 @@ const _PE_PALETTE = [
     '#f0b27a','#76d7c4','#ec7063','#d4e6f1','#d5f5e3'
 ];
 
-// Schedule a treemap re-render (debounced via rAF)
+// Schedule a treemap re-render (debounced via rAF, cancellable)
 function _peScheduleRender() {
-    if (_peRenderScheduled) return;
-    _peRenderScheduled = true;
-    requestAnimationFrame(() => {
-        _peRenderScheduled = false;
+    if (_peRafId) return;   // already queued
+    _peRafId = requestAnimationFrame(() => {
+        _peRafId = null;
         const agg = window._paramExplorerAgg;
         const modal = document.getElementById('paramExplorerModal');
         if (!agg || !modal || modal.style.display === 'none') return;
         if (paramExplorerZoomState) return;   // don't clobber active zoom
         const treemapDiv = document.getElementById('paramExplorerTreemap');
-        if (treemapDiv) _peRenderOverview(agg, treemapDiv, /*loading=*/true);
+        if (treemapDiv) _peRenderOverview(_peFilteredAgg() || agg, treemapDiv, /*loading=*/true);
     });
 }
 
@@ -2883,6 +3054,9 @@ async function openParameterExplorer() {
     treemapDiv.innerHTML  = '';
     paramExplorerZoomState = null;
     window._paramExplorerAgg = null;
+    window._peHiddenFiles = new Set();
+    window._peAllowedValues = [];
+    window._peParamAllowedValues = {};
     if (searchInput) { searchInput.style.display = 'none'; searchInput.value = ''; }
     if (backBtn)     backBtn.style.display = 'none';
 
@@ -2892,18 +3066,21 @@ async function openParameterExplorer() {
 
     const region = example1State.region;
 
-    // ── Phase 1: collect param names (use prefetch cache where ready, else fetch now) ──
-    // For any file not yet in the cache, fetch now (lightweight — names only)
-    const missing = selectedFiles.filter(f => !window._paramNamesCache[f.egId]);
-    if (missing.length > 0) {
+    // ── Phase 1: collect param names ────────────────────────────────────────
+    // For files whose fetch hasn't completed yet, await the in-progress promise
+    // (or start a new one).  This correctly handles the race where the background
+    // prefetch started but hasn't finished yet — the old code read an empty Set
+    // and thought it was done.
+    const notReady = selectedFiles.filter(f => !window._paramNamesCache[f.egId]);
+    if (notReady.length > 0) {
         let done = 0;
         const CONCURRENCY = 4;
-        for (let i = 0; i < missing.length; i += CONCURRENCY) {
+        for (let i = 0; i < notReady.length; i += CONCURRENCY) {
             if (modal.style.display === 'none') return;
-            await Promise.all(missing.slice(i, i + CONCURRENCY).map(async f => {
-                await _prefetchParamNames(f.egId, region);
+            await Promise.all(notReady.slice(i, i + CONCURRENCY).map(async f => {
+                await _prefetchParamNames(f.egId, region);   // awaits existing promise if in-flight
                 done++;
-                progress.textContent = `Collecting parameter names: ${done} / ${missing.length} files…`;
+                progress.textContent = `Collecting parameter names: ${done} / ${notReady.length} files…`;
             }));
         }
     }
@@ -2931,6 +3108,9 @@ async function openParameterExplorer() {
 }
 
 function _peRenderChecklist(paramFileMap, selectedFiles, container) {
+    // Store state so compliance back-navigation can re-render
+    window._peLastChecklistState = { paramFileMap, selectedFiles };
+
     // Sort: params present in most files first, then alphabetically
     const params = Array.from(paramFileMap.entries())
         .map(([name, egIds]) => ({ name, fileCount: egIds.size }))
@@ -2973,7 +3153,8 @@ function _peToggleAll(checked) {
 }
 
 function _peCountSelected() {
-    const n = document.querySelectorAll('.pe-param-cb:checked').length;
+    const checked = [...document.querySelectorAll('.pe-param-cb:checked')];
+    const n = checked.length;
     const el = document.getElementById('peSelectedCount');
     if (el) el.textContent = `${n} selected`;
     const all = document.getElementById('peSelectAll');
@@ -2981,6 +3162,11 @@ function _peCountSelected() {
         const total = document.querySelectorAll('.pe-param-cb').length;
         all.indeterminate = n > 0 && n < total;
         all.checked = n === total;
+    }
+    // Auto-populate compliance input when exactly 1 checkbox is checked
+    const compInput = document.getElementById('peCompAllowedInput');
+    if (!compInput) {
+        // checklist phase — no compliance bar yet, nothing to do
     }
 }
 
@@ -3012,6 +3198,247 @@ function filterParamExplorerTreemap(query) {
     }
 }
 
+// ── (legacy kept for potential external callers) ─────────────────────────────
+async function _peRunCompliance_UNUSED() {
+    const paramName  = (document.getElementById('peCompParamName')?.value  || '').trim();
+    const allowedRaw = (document.getElementById('peCompAllowedValues')?.value || '').trim();
+
+    if (!paramName)  { alert('Please enter a Parameter Name.');            return; }
+    if (!allowedRaw) { alert('Please enter at least one Allowed Value.'); return; }
+
+    const allowedValues = allowedRaw.split(',').map(v => v.trim()).filter(Boolean);
+
+    const selectedFiles = (example1State.fileSummary || []).filter(f => selectedEgIds.has(f.egId));
+    if (selectedFiles.length === 0) { alert('No files selected.'); return; }
+
+    const region = example1State.region || 'US';
+
+    // Switch PE to compliance-results view
+    const loading    = document.getElementById('paramExplorerLoading');
+    const progress   = document.getElementById('paramExplorerProgress');
+    const subtitle   = document.getElementById('paramExplorerSubtitle');
+    const treemapDiv = document.getElementById('paramExplorerTreemap');
+    const backBtn    = document.getElementById('paramExplorerBackBtn');
+    const search     = document.getElementById('paramExplorerSearch');
+
+    loading.style.display = 'flex';
+    progress.textContent  = `Scanning ${selectedFiles.length} file${selectedFiles.length !== 1 ? 's' : ''}…`;
+    if (subtitle) subtitle.textContent = `Compliance: ${paramName}`;
+    if (search)   search.style.display = 'none';
+    treemapDiv.innerHTML = '';
+    if (backBtn) { backBtn.style.display = ''; backBtn.onclick = null; }
+    window._complianceElemsRegistry = {};
+
+    const ELEMENT_Q = `
+        query ComplianceElements($elementGroupId: ID!, $filter: ElementFilterInput, $pagination: PaginationInput) {
+            elementsByElementGroup(elementGroupId: $elementGroupId, filter: $filter, pagination: $pagination) {
+                pagination { cursor }
+                results {
+                    id name
+                    properties(pagination: { limit: 500 }) { results { name value } }
+                }
+            }
+        }`;
+
+    const paramNormalized = paramName.replace(/_/g, ' ');
+    const paramAlt        = paramName.replace(/ /g, '_');
+    const matchesProp     = (n) => n === paramName || n === paramNormalized || n === paramAlt;
+    const matchesRevitId  = (n) => {
+        const nl = n.toLowerCase().replace(/\s+/g, '');
+        return nl === 'revitelementid' || nl === 'elementid';
+    };
+
+    const fileResults = [];
+    const globalValueMap = new Map();
+    let filesWithData = 0, scanned = 0;
+    const BATCH = 5;
+
+    try {
+        for (let i = 0; i < selectedFiles.length; i += BATCH) {
+            await Promise.all(selectedFiles.slice(i, i + BATCH).map(async eg => {
+                let fileTotal = 0, fileCompliant = 0;
+                const fileValues = {};
+                const fileElements = [];
+                try {
+                    let cursor = null;
+                    do {
+                        const res = await executeGraphQLQuery(ELEMENT_Q, {
+                            elementGroupId: eg.egId,
+                            filter: {},
+                            pagination: cursor ? { cursor, limit: 200 } : { limit: 200 }
+                        }, region, 2);
+                        const data = res.data?.elementsByElementGroup;
+                        for (const el of (data?.results || [])) {
+                            let paramVal = null, revitId = '';
+                            for (const p of (el.properties?.results || [])) {
+                                if (paramVal === null && matchesProp(p.name)) paramVal = p.value;
+                                if (!revitId && matchesRevitId(p.name)) revitId = String(p.value ?? '');
+                            }
+                            if (paramVal !== null && paramVal !== undefined) {
+                                const key = paramVal === '' ? '(not set)' : String(paramVal);
+                                fileValues[key] = (fileValues[key] || 0) + 1;
+                                globalValueMap.set(key, (globalValueMap.get(key) || 0) + 1);
+                                fileTotal++;
+                                const ok = allowedValues.includes(key);
+                                if (ok) fileCompliant++;
+                                fileElements.push({ revitId, paramValue: key, compliant: ok, elementName: el.name || '' });
+                            }
+                        }
+                        cursor = data?.pagination?.cursor || null;
+                    } while (cursor);
+                    if (fileTotal > 0) filesWithData++;
+                } catch (e) {
+                    logDebug(`PE compliance: skipped ${eg.egName}: ${e.message.slice(0, 60)}`);
+                }
+                if (fileTotal > 0) {
+                    fileResults.push({
+                        egId: eg.egId, egName: eg.egName, projectName: eg.projectName || '',
+                        fileVersionUrn: eg.fileVersionUrn || null,
+                        total: fileTotal, compliant: fileCompliant,
+                        violations: fileTotal - fileCompliant,
+                        values: fileValues, elements: fileElements
+                    });
+                }
+                scanned++;
+            }));
+            progress.textContent = `Scanned ${scanned} / ${selectedFiles.length} files…`;
+        }
+    } catch (err) {
+        loading.style.display = 'none';
+        treemapDiv.innerHTML = `<div style="color:#c62828;padding:16px;font-size:13px;">Error: ${err.message}</div>`;
+        return;
+    }
+
+    loading.style.display = 'none';
+
+    // ── Render results ────────────────────────────────────────────────────────
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'padding:12px;';
+
+    if (globalValueMap.size === 0) {
+        wrap.innerHTML =
+            `<div style="background:#fff8e1;border-radius:6px;padding:12px;font-size:13px;color:#795548;">` +
+            `No <strong>${paramName}</strong> data found across the ${selectedFiles.length} selected file${selectedFiles.length !== 1 ? 's' : ''}.` +
+            `<br><span style="font-size:12px;">Check spelling — parameter names are case-sensitive (e.g. <code>Fire_Resistance_Rating</code>).</span></div>`;
+        treemapDiv.appendChild(wrap);
+        return;
+    }
+
+    const totalElements  = [...globalValueMap.values()].reduce((s, c) => s + c, 0);
+    const compliantCount = [...globalValueMap.entries()].filter(([v]) => allowedValues.includes(v)).reduce((s, [, c]) => s + c, 0);
+    const violationCount = totalElements - compliantCount;
+    const pct = totalElements > 0 ? Math.round(compliantCount / totalElements * 100) : 0;
+
+    // Summary
+    const summaryBg    = violationCount === 0 ? '#e8f5e9' : '#ffebee';
+    const summaryColor = violationCount === 0 ? '#2e7d32' : '#c62828';
+    const summaryDiv = document.createElement('div');
+    summaryDiv.style.cssText = `background:${summaryBg};border-radius:6px;padding:10px 12px;margin-bottom:12px;font-size:13px;`;
+    if (violationCount === 0) {
+        summaryDiv.innerHTML = `<div style="color:#2e7d32;font-weight:bold;">✅ 100% compliant — all ${totalElements.toLocaleString()} elements have allowed values.</div>`;
+    } else {
+        summaryDiv.innerHTML =
+            `<div style="color:${summaryColor};font-weight:bold;">⚠️ ${violationCount.toLocaleString()} of ${totalElements.toLocaleString()} elements (${100 - pct}%) have non-allowed values.</div>` +
+            `<div style="color:#2e7d32;margin-top:2px;">✓ ${compliantCount.toLocaleString()} compliant (${pct}%)</div>`;
+    }
+    summaryDiv.innerHTML += `<div style="color:#555;font-size:11px;margin-top:4px;">Parameter: <strong>${paramName}</strong> · Allowed: <strong>${allowedValues.join(', ')}</strong> · ${filesWithData} file${filesWithData !== 1 ? 's' : ''} with data</div>`;
+    wrap.appendChild(summaryDiv);
+
+    // Per-file collapsible sections
+    const resultsDiv = document.createElement('div');
+    const sortedFiles = [...fileResults].sort((a, b) => b.violations - a.violations);
+    let regKeySeq = 0;
+
+    for (const f of sortedFiles) {
+        const valueBuckets = {};
+        for (const el of f.elements) {
+            if (!valueBuckets[el.paramValue]) valueBuckets[el.paramValue] = [];
+            if (el.revitId) valueBuckets[el.paramValue].push(el.revitId);
+        }
+        const section  = document.createElement('div');
+        section.style.cssText = 'border:1px solid #e0e0e0;border-radius:6px;margin-bottom:8px;overflow:hidden;font-size:12px;';
+        const filePct    = f.total > 0 ? Math.round(f.compliant / f.total * 100) : 0;
+        const headerBg   = f.violations === 0 ? '#e8f5e9' : (filePct >= 80 ? '#fff8e1' : '#ffebee');
+        const statusIcon = f.violations === 0 ? '✅' : '⚠️';
+        const header = document.createElement('div');
+        header.style.cssText = `background:${headerBg};padding:8px 12px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;user-select:none;`;
+        header.innerHTML =
+            `<span style="font-weight:600;color:#333;">${statusIcon} ${f.egName}</span>` +
+            `<span style="display:flex;gap:16px;font-size:11px;align-items:center;">` +
+            `<span style="color:#c62828;">${f.violations.toLocaleString()} non-compliant</span>` +
+            `<span style="color:#2e7d32;">${f.compliant.toLocaleString()} compliant</span>` +
+            (f.projectName ? `<span style="color:#888;">${f.projectName}</span>` : '') +
+            `<span class="comp-arrow" style="color:#999;min-width:10px;">${f.violations > 0 ? '▼' : '▶'}</span></span>`;
+
+        const tableWrap = document.createElement('div');
+        tableWrap.style.display = f.violations > 0 ? 'block' : 'none';
+
+        let tableHtml = `<div style="background:#f5f5f5;padding:5px 12px;display:grid;grid-template-columns:24px 1fr 70px 56px;gap:8px;font-weight:600;color:#555;border-top:1px solid #e0e0e0;">`;
+        tableHtml += `<span></span><span>${paramName} value</span><span style="text-align:right;">Elements</span><span style="text-align:center;">Status</span></div>`;
+
+        const sorted = Object.entries(f.values).sort((a, b) => {
+            const aOk = allowedValues.includes(a[0]) ? 1 : 0;
+            const bOk = allowedValues.includes(b[0]) ? 1 : 0;
+            if (aOk !== bOk) return aOk - bOk;
+            return b[1] - a[1];
+        });
+        for (const [value, count] of sorted) {
+            const allowed = allowedValues.includes(value);
+            const regKey  = `r${regKeySeq++}`;
+            window._complianceElemsRegistry[regKey] = valueBuckets[value] || [];
+            tableHtml +=
+                `<div style="background:${allowed ? '#fff' : '#fff3f3'};padding:5px 12px;border-top:1px solid #f0f0f0;display:grid;grid-template-columns:24px 1fr 70px 56px;gap:8px;align-items:center;">` +
+                `<input type="checkbox" class="comp-row-cb" data-regkey="${regKey}" style="cursor:pointer;accent-color:${allowed ? '#2e7d32' : '#c62828'};">` +
+                `<span style="color:${allowed ? '#333' : '#c62828'};font-weight:${allowed ? 400 : 600};">${value}</span>` +
+                `<span style="text-align:right;color:#555;">${count.toLocaleString()}</span>` +
+                `<span style="text-align:center;">${allowed ? '<span style="color:#2e7d32;font-weight:bold;">✓</span>' : '<span style="color:#c62828;font-weight:bold;">✗</span>'}</span>` +
+                `</div>`;
+        }
+        tableWrap.innerHTML = tableHtml;
+        header.addEventListener('click', () => {
+            const open = tableWrap.style.display !== 'none';
+            tableWrap.style.display = open ? 'none' : 'block';
+            const arrow = header.querySelector('.comp-arrow');
+            if (arrow) arrow.textContent = open ? '▶' : '▼';
+        });
+        section.appendChild(header);
+        section.appendChild(tableWrap);
+        resultsDiv.appendChild(section);
+    }
+
+    // Copy-IDs bar
+    const copyBar = document.createElement('div');
+    copyBar.style.cssText = 'margin-top:12px;display:flex;align-items:center;gap:10px;';
+    const copySelBtn = document.createElement('button');
+    copySelBtn.textContent = '📋 Copy selected IDs';
+    copySelBtn.style.cssText = 'padding:8px 16px;font-size:13px;font-weight:600;background:#1565c0;color:white;border:none;border-radius:5px;cursor:pointer;flex:1;';
+    const copyFeedback = document.createElement('span');
+    copyFeedback.style.cssText = 'font-size:12px;color:#2e7d32;display:none;';
+    copySelBtn.addEventListener('click', () => {
+        const cbs = resultsDiv.querySelectorAll('.comp-row-cb:checked');
+        const ids = [];
+        cbs.forEach(cb => { ids.push(...(window._complianceElemsRegistry[cb.dataset.regkey] || [])); });
+        if (ids.length === 0) { alert('Select at least one value row first.'); return; }
+        navigator.clipboard.writeText(ids.join(';'));
+        copyFeedback.textContent = `✓ Copied ${ids.length} IDs`;
+        copyFeedback.style.display = 'inline';
+        setTimeout(() => { copyFeedback.style.display = 'none'; }, 3000);
+    });
+    copyBar.appendChild(copySelBtn);
+    copyBar.appendChild(copyFeedback);
+    resultsDiv.appendChild(copyBar);
+
+    wrap.appendChild(resultsDiv);
+
+    // Compliance treemap (coloured by compliance ratio)
+    const tmDiv = document.createElement('div');
+    tmDiv.style.cssText = 'margin-top:16px;';
+    wrap.appendChild(tmDiv);
+    renderComplianceTreemap(tmDiv, fileResults.filter(f => f.total > 0), allowedValues, paramName, '', region);
+
+    treemapDiv.appendChild(wrap);
+}
+
 async function _peLoadCheckedValues() {
     const checked = [...document.querySelectorAll('.pe-param-cb:checked')].map(cb => cb.value);
     if (checked.length === 0) { alert('Please select at least one parameter.'); return; }
@@ -3025,9 +3452,10 @@ async function _peLoadCheckedValues() {
     const backBtn   = document.getElementById('paramExplorerBackBtn');
 
     loading.style.display = 'flex';
-    treemapDiv.innerHTML  = '';
+    // Don't clear treemap yet — let live renders fill it progressively;
+    // it will be replaced on the first _peScheduleRender call.
     paramExplorerZoomState = null;
-    if (searchInput) searchInput.value = '';
+    if (searchInput) { searchInput.style.display = ''; searchInput.value = ''; }
     if (backBtn)     backBtn.style.display = 'none';
 
     const selectedFiles = (example1State.fileSummary || []).filter(f => selectedEgIds.has(f.egId));
@@ -3037,6 +3465,7 @@ async function _peLoadCheckedValues() {
     // aggregated: paramName → value → { count, categories: Set, files: Set }
     const agg = new Map();
     window._paramExplorerAgg = agg;
+    treemapDiv.innerHTML = '';   // clear checklist now that we're switching to treemap mode
 
     const distinctQuery = `
         query GetDistinctByName($elementGroupId: ID!, $name: String!) {
@@ -3046,11 +3475,16 @@ async function _peLoadCheckedValues() {
         }`;
 
     // Build (file, paramName) work items
+    // Use the API-normalised name for the actual query (handles Fire_Resistance_Rating → Fire Resistance Rating)
     const workItems = [];
     for (const f of selectedFiles) {
-        const cache = window._paramNamesCache[f.egId] || new Set();
+        const cache  = window._paramNamesCache[f.egId]   || new Set();
+        const apiMap = window._paramApiNameCache[f.egId] || new Map();
         for (const paramName of checked) {
-            if (cache.has(paramName)) workItems.push({ f, paramName });
+            if (cache.has(paramName)) {
+                const apiName = apiMap.get(paramName) || paramName;
+                workItems.push({ f, paramName, apiName });
+            }
         }
     }
 
@@ -3058,30 +3492,92 @@ async function _peLoadCheckedValues() {
     const CONCURRENCY = 6;
     for (let i = 0; i < workItems.length; i += CONCURRENCY) {
         if (modal.style.display === 'none') return;
-        await Promise.all(workItems.slice(i, i + CONCURRENCY).map(async ({ f, paramName }) => {
+        await Promise.all(workItems.slice(i, i + CONCURRENCY).map(async ({ f, paramName, apiName }) => {
             try {
-                const r = await executeGraphQLQuery(distinctQuery, { elementGroupId: f.egId, name: paramName }, region);
+                const r = await executeGraphQLQuery(distinctQuery, { elementGroupId: f.egId, name: apiName }, region);
                 const vals = r.data?.distinctPropertyValuesInElementGroupByName?.results?.[0]?.values || [];
                 if (!agg.has(paramName)) agg.set(paramName, new Map());
                 const byValue = agg.get(paramName);
-                for (const { value, count } of vals) {
+                for (const { value } of vals) {
                     if (value == null || String(value).trim() === '') continue;
                     const v = String(value).length > 120 ? String(value).slice(0, 120) + '…' : String(value);
                     if (!byValue.has(v)) byValue.set(v, { count: 0, categories: new Set(), files: new Set() });
-                    const entry = byValue.get(v);
-                    entry.count += count || 1;
-                    entry.files.add(f.egName);
+                    byValue.get(v).files.add(f.egName);
                 }
             } catch (err) {
                 logDebug(`peLoadValues: ${f.egName}/${paramName}: ${err.message}`);
             }
             done++;
-            progress.textContent = `Loading values: ${done} / ${workItems.length}…`;
+            progress.textContent = `Discovering values: ${done} / ${workItems.length}…`;
+        }));
+    }
+
+    if (modal.style.display === 'none') return;
+
+    // ── Phase B: count actual Revit elements per value ────────────────────────
+    const isV1 = example1State.version === 'v1';
+    const _cqV1 = `
+        query CountElsV1($elementGroupId: ID!, $filter: ElementFilterInput, $pagination: PaginationInput) {
+            elementsByElementGroupAtVersion(elementGroupId: $elementGroupId, versionNumber: 1, filter: $filter, pagination: $pagination) {
+                pagination { cursor }
+                results { id }
+            }
+        }`;
+    const _cqV2 = `
+        query CountEls($elementGroupId: ID!, $filter: ElementFilterInput, $pagination: PaginationInput) {
+            elementsByElementGroup(elementGroupId: $elementGroupId, filter: $filter, pagination: $pagination) {
+                pagination { cursor }
+                results { id }
+            }
+        }`;
+    const _cKey = isV1 ? 'elementsByElementGroupAtVersion' : 'elementsByElementGroup';
+
+    const countItems = [];
+    for (const [paramName, byValue] of agg) {
+        for (const [valueName, entry] of byValue) {
+            for (const fileName of entry.files) {
+                const fc = selectedFiles.find(sf => sf.egName === fileName);
+                if (fc) {
+                    const an = (window._paramApiNameCache[fc.egId]?.get(paramName)) || paramName;
+                    countItems.push({ fc, an, valueName, entry });
+                }
+            }
+        }
+    }
+
+    let doneB = 0;
+    for (let i = 0; i < countItems.length; i += CONCURRENCY) {
+        if (modal.style.display === 'none') return;
+        await Promise.all(countItems.slice(i, i + CONCURRENCY).map(async ({ fc, an, valueName, entry }) => {
+            try {
+                const pp = /\s/.test(an)
+                    ? ("'property.name." + an.replace(/'/g, "\\'") + "'")
+                    : ("property.name." + an.replace(/'/g, "\\'"));
+                const ev = String(valueName).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+                let cnt = 0, cur = null;
+                do {
+                    const r = await executeGraphQLQuery(isV1 ? _cqV1 : _cqV2, {
+                        elementGroupId: fc.egId,
+                        filter: { query: pp + "=='" + ev + "'" },
+                        pagination: cur ? { cursor: cur, limit: 500 } : { limit: 500 }
+                    }, region);
+                    const d2 = r.data?.[_cKey];
+                    cnt += (d2?.results || []).length;
+                    cur = d2?.pagination?.cursor || null;
+                } while (cur);
+                entry.count += cnt;
+            } catch (err) {
+                logDebug(`peCountEls: ${fc.egName}/${valueName}: ${err.message}`);
+            }
+            doneB++;
+            progress.textContent = `Counting elements: ${doneB} / ${countItems.length}…`;
             _peScheduleRender();
         }));
     }
 
     if (modal.style.display === 'none') return;
+    // Cancel any pending live-render rAF so it can't overwrite the final render
+    if (_peRafId) { cancelAnimationFrame(_peRafId); _peRafId = null; }
     loading.style.display = 'none';
     subtitle.textContent = `${n} file${n !== 1 ? 's' : ''} · ${checked.length} parameters`;
     _peRenderOverview(agg, treemapDiv, false);
@@ -3105,10 +3601,15 @@ function paramExplorerZoomIn(paramName) {
     const subtitle = document.getElementById('paramExplorerSubtitle');
     const search   = document.getElementById('paramExplorerSearch');
     if (backBtn)  backBtn.style.display = '';
-    if (subtitle) subtitle.textContent  = `Parameter: ${paramName}`;
+    const filtAgg  = _peFilteredAgg() || agg;
+    const _zByValue = (filtAgg.get(paramName)) || agg.get(paramName);
+    const _zParamFiles = new Set([..._zByValue.values()].flatMap(e => [...e.files]));
+    const _zTotalFiles = (example1State.fileSummary || []).filter(f => selectedEgIds.has(f.egId)).length;
+    const _zFileSuffix = _zTotalFiles > 1 ? `  ·  found in ${_zParamFiles.size} of ${_zTotalFiles} files` : '';
+    if (subtitle) subtitle.textContent  = `${paramName}${_zFileSuffix}`;
     if (search)   search.value = '';
 
-    _peRenderZoom(agg.get(paramName), paramName, document.getElementById('paramExplorerTreemap'));
+    _peRenderZoom(_zByValue, paramName, document.getElementById('paramExplorerTreemap'));
 }
 
 function paramExplorerZoomOut() {
@@ -3123,7 +3624,7 @@ function paramExplorerZoomOut() {
         const n = (example1State.fileSummary || []).filter(f => selectedEgIds.has(f.egId)).length;
         subtitle.textContent = `${n} file${n !== 1 ? 's' : ''} · ${agg.size} parameters`;
     }
-    if (agg) _peRenderOverview(agg, document.getElementById('paramExplorerTreemap'), false);
+    if (agg) _peRenderOverview(_peFilteredAgg() || agg, document.getElementById('paramExplorerTreemap'), false);
 }
 
 // ── shared tooltip helper ─────────────────────────────────────────────────────
@@ -3146,6 +3647,322 @@ function _peHideTooltip() {
     if (paramExplorerTooltip) paramExplorerTooltip.style.display = 'none';
 }
 
+// ── per-param compliance bar shown in zoom view ─────────────────────────────
+function _peBuildParamComplianceBar(paramName) {
+    const av = (window._peParamAllowedValues || {})[paramName] || [];
+    const bar = document.createElement('div');
+    bar.style.cssText = [
+        'display:flex', 'align-items:center', 'gap:8px', 'flex-wrap:wrap',
+        'padding:5px 10px',
+        `background:${av.length > 0 ? '#e8f5e9' : '#f5f5f5'}`,
+        `border-bottom:1px solid ${av.length > 0 ? '#c8e6c9' : '#e0e0e0'}`,
+        'font-size:11px'
+    ].join(';');
+
+    const lbl = document.createElement('span');
+    lbl.style.cssText = `font-weight:600;color:${av.length > 0 ? '#2e7d32' : '#666'};white-space:nowrap;flex-shrink:0;font-size:11px;`;
+    lbl.textContent = `✓ Allowed values:`;
+    bar.appendChild(lbl);
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = 'e.g. EI60, EI120 — Enter or Apply';
+    input.value = av.join(', ');
+    input.style.cssText = [
+        'flex:1', 'min-width:160px', 'padding:4px 8px',
+        `border:1px solid ${av.length > 0 ? '#a5d6a7' : '#d0d0d0'}`,
+        'border-radius:4px', 'font-size:12px', 'outline:none', 'background:white'
+    ].join(';');
+    bar.appendChild(input);
+
+    const applyBtn = document.createElement('button');
+    applyBtn.textContent = 'Apply';
+    applyBtn.style.cssText = 'padding:4px 12px;font-size:12px;font-weight:600;background:#0696d7;color:white;border:none;border-radius:4px;cursor:pointer;flex-shrink:0;';
+    const doApply = () => {
+        const vals = input.value.split(',').map(v => v.trim()).filter(Boolean);
+        if (!window._peParamAllowedValues) window._peParamAllowedValues = {};
+        if (vals.length > 0) window._peParamAllowedValues[paramName] = vals;
+        else delete window._peParamAllowedValues[paramName];
+        _peReRender();
+    };
+    applyBtn.addEventListener('click', doApply);
+    bar.appendChild(applyBtn);
+
+    if (av.length > 0) {
+        const clearBtn = document.createElement('button');
+        clearBtn.textContent = '✕ Clear';
+        clearBtn.style.cssText = 'padding:4px 10px;font-size:12px;background:transparent;color:#c62828;border:1px solid #ef9a9a;border-radius:4px;cursor:pointer;flex-shrink:0;';
+        clearBtn.addEventListener('click', () => {
+            if (window._peParamAllowedValues) delete window._peParamAllowedValues[paramName];
+            _peReRender();
+        });
+        bar.appendChild(clearBtn);
+
+        const filtAgg = _peFilteredAgg() || new Map();
+        const byValue = filtAgg.get(paramName);
+        if (byValue) {
+            let compliant = 0, nonCompliant = 0;
+            byValue.forEach((entry, value) => {
+                if (av.includes(value)) compliant += entry.count;
+                else nonCompliant += entry.count;
+            });
+            if (compliant + nonCompliant > 0) {
+                const summary = document.createElement('span');
+                summary.style.cssText = 'font-size:11px;white-space:nowrap;font-weight:600;';
+                summary.innerHTML =
+                    `<span style="color:#2e7d32;">✓ ${compliant.toLocaleString()}</span>` +
+                    `&nbsp;&nbsp;<span style="color:#c62828;">✗ ${nonCompliant.toLocaleString()}</span>`;
+                bar.appendChild(summary);
+            }
+        }
+    }
+
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') doApply(); });
+    return bar;
+}
+
+// ── compliance popover (triggered from ✎ icon on a parameter tile) ──────────
+function _peShowCompliancePopover(event, paramName) {
+    let pop = document.getElementById('peCompParamPopover');
+    if (pop && pop._currentParam === paramName && pop.style.display !== 'none') {
+        pop.style.display = 'none';
+        return;
+    }
+    if (!pop) {
+        pop = document.createElement('div');
+        pop.id = 'peCompParamPopover';
+        pop.style.cssText = [
+            'position:fixed', 'z-index:5100', 'background:#ffffff',
+            'border:1px solid #d5dbe1', 'border-radius:4px',
+            'box-shadow:0 4px 16px rgba(0,0,0,0.14)',
+            'padding:16px 18px', 'min-width:320px', 'max-width:440px',
+            "font-family:'ArtifaktElement','Helvetica Neue',Arial,sans-serif",
+            'font-size:13px'
+        ].join(';');
+        document.body.appendChild(pop);
+        document.addEventListener('mousedown', e => {
+            if (pop.style.display !== 'none' && !pop.contains(e.target)) pop.style.display = 'none';
+        }, true);
+        document.addEventListener('keydown', e => {
+            if (e.key === 'Escape') pop.style.display = 'none';
+        });
+    }
+    pop._currentParam = paramName;
+    const current = (window._peParamAllowedValues || {})[paramName] || [];
+
+    pop.innerHTML = `
+        <div style="font-size:10px;font-weight:700;color:#0696d7;text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px;">Compliance Check</div>
+        <div style="font-size:13px;color:#3c3c3c;font-weight:600;margin-bottom:12px;word-break:break-word;">${paramName}</div>
+        <label style="display:block;font-size:11px;font-weight:600;color:#3c3c3c;margin-bottom:5px;">
+            Allowed values <span style="font-weight:400;color:#7a7a7a;">(comma-separated)</span>
+        </label>
+        <input id="pePopoverInput" type="text"
+            placeholder="e.g. EI60, EI120"
+            value="${current.join(', ')}"
+            style="width:100%;box-sizing:border-box;padding:7px 10px;border:1px solid #d5dbe1;border-radius:4px;font-size:13px;outline:none;margin-bottom:12px;font-family:inherit;color:#3c3c3c;transition:border-color .15s;"
+            onfocus="this.style.borderColor='#0696d7';this.style.boxShadow='0 0 0 2px rgba(6,150,215,.18)'"
+            onblur="this.style.borderColor='#d5dbe1';this.style.boxShadow='none'">
+        <div style="display:flex;gap:8px;">
+            <button id="pePopoverApply" style="flex:1;height:32px;font-size:13px;font-weight:600;background:#0696d7;color:white;border:none;border-radius:4px;cursor:pointer;font-family:inherit;transition:background .15s;"
+                onmouseover="this.style.background='#0484bd'" onmouseout="this.style.background='#0696d7'">Apply</button>
+            <button id="pePopoverClear" style="height:32px;padding:0 14px;font-size:13px;font-weight:500;background:transparent;color:#d33;border:1px solid #d5dbe1;border-radius:4px;cursor:pointer;font-family:inherit;transition:border-color .15s;"
+                onmouseover="this.style.borderColor='#d33'" onmouseout="this.style.borderColor='#d5dbe1'">Clear</button>
+        </div>`;
+
+    const input    = pop.querySelector('#pePopoverInput');
+    const applyBtn = pop.querySelector('#pePopoverApply');
+    const clearBtn = pop.querySelector('#pePopoverClear');
+
+    const apply = () => {
+        const vals = (input.value || '').split(',').map(v => v.trim()).filter(Boolean);
+        if (!window._peParamAllowedValues) window._peParamAllowedValues = {};
+        if (vals.length > 0) window._peParamAllowedValues[paramName] = vals;
+        else delete window._peParamAllowedValues[paramName];
+        pop.style.display = 'none';
+        _peReRender();
+    };
+    applyBtn.addEventListener('click', apply);
+    clearBtn.addEventListener('click', () => {
+        if (window._peParamAllowedValues) delete window._peParamAllowedValues[paramName];
+        pop.style.display = 'none';
+        _peReRender();
+    });
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') apply(); });
+
+    pop.style.display = 'block';
+    const left = Math.min(event.clientX + 8, window.innerWidth - 440);
+    const top  = Math.min(event.clientY + 8, window.innerHeight - 190);
+    pop.style.left = Math.max(8, left) + 'px';
+    pop.style.top  = Math.max(8, top)  + 'px';
+    setTimeout(() => input.focus(), 30);
+}
+
+// ── compliance bar: allowed-values input shown above every treemap view ───────
+function _peBuildComplianceBar() {
+    const av = window._peAllowedValues || [];
+    const bar = document.createElement('div');
+    bar.id = 'peComplianceBar';
+    bar.style.cssText = [
+        'display:flex', 'align-items:center', 'gap:8px', 'flex-wrap:wrap',
+        'padding:5px 10px',
+        `background:${av.length > 0 ? '#e8f5e9' : '#f5f5f5'}`,
+        `border-bottom:1px solid ${av.length > 0 ? '#c8e6c9' : '#e0e0e0'}`,
+        'font-size:11px'
+    ].join(';');
+
+    const lbl = document.createElement('span');
+    lbl.style.cssText = `font-weight:600;color:${av.length > 0 ? '#2e7d32' : '#666'};white-space:nowrap;flex-shrink:0;`;
+    lbl.textContent = '✓ Compliance – Allowed values:';
+    bar.appendChild(lbl);
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.id = 'peCompAllowedInput';
+    input.placeholder = 'e.g. EI60, EI120, EI30  — press Enter or Apply';
+    input.value = av.join(', ');
+    input.style.cssText = [
+        'flex:1', 'min-width:200px', 'padding:4px 8px',
+        `border:1px solid ${av.length > 0 ? '#a5d6a7' : '#d0d0d0'}`,
+        'border-radius:4px', 'font-size:12px', 'outline:none', 'background:white'
+    ].join(';');
+    bar.appendChild(input);
+
+    const applyBtn = document.createElement('button');
+    applyBtn.textContent = 'Apply';
+    applyBtn.style.cssText = 'padding:4px 12px;font-size:12px;font-weight:600;background:#0696d7;color:white;border:none;border-radius:4px;cursor:pointer;flex-shrink:0;';
+    applyBtn.addEventListener('click', () => {
+        const raw = document.getElementById('peCompAllowedInput')?.value || '';
+        window._peAllowedValues = raw.split(',').map(v => v.trim()).filter(Boolean);
+        _peReRender();
+    });
+    bar.appendChild(applyBtn);
+
+    if (av.length > 0) {
+        const clearBtn = document.createElement('button');
+        clearBtn.textContent = '✕ Clear';
+        clearBtn.style.cssText = 'padding:4px 10px;font-size:12px;background:transparent;color:#c62828;border:1px solid #ef9a9a;border-radius:4px;cursor:pointer;flex-shrink:0;';
+        clearBtn.addEventListener('click', () => {
+            window._peAllowedValues = [];
+            _peReRender();
+        });
+        bar.appendChild(clearBtn);
+
+        // Live summary counts from current filtered agg
+        const filtAgg = _peFilteredAgg() || new Map();
+        let compliant = 0, nonCompliant = 0;
+        filtAgg.forEach(byValue => {
+            byValue.forEach((entry, value) => {
+                if (av.includes(value)) compliant += entry.count;
+                else nonCompliant += entry.count;
+            });
+        });
+        if (compliant + nonCompliant > 0) {
+            const summary = document.createElement('span');
+            summary.style.cssText = 'font-size:11px;white-space:nowrap;font-weight:600;';
+            summary.innerHTML =
+                `<span style="color:#2e7d32;">✓ ${compliant.toLocaleString()}</span>` +
+                `&nbsp;&nbsp;<span style="color:#c62828;">✗ ${nonCompliant.toLocaleString()}</span>`;
+            bar.appendChild(summary);
+        }
+    }
+
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') applyBtn.click(); });
+    return bar;
+}
+
+function _peReRender() {
+    const cont = document.getElementById('paramExplorerTreemap');
+    if (!cont) return;
+    const filtAgg = _peFilteredAgg() || new Map();
+    if (paramExplorerZoomState) {
+        const byValue = filtAgg.get(paramExplorerZoomState);
+        if (byValue) _peRenderZoom(byValue, paramExplorerZoomState, cont);
+        else { paramExplorerZoomState = null; _peRenderOverview(filtAgg, cont, false); }
+    } else {
+        _peRenderOverview(filtAgg, cont, false);
+    }
+}
+
+// ── helper: filter global agg by hidden files ───────────────────────────────
+function _peFilteredAgg() {
+    const hidden = window._peHiddenFiles || new Set();
+    const source = window._paramExplorerAgg;
+    if (!source || hidden.size === 0) return source;
+    const filtered = new Map();
+    source.forEach((byValue, paramName) => {
+        const filteredByValue = new Map();
+        byValue.forEach((entry, value) => {
+            const visibleFiles = [...entry.files].filter(f => !hidden.has(f));
+            if (visibleFiles.length > 0) {
+                filteredByValue.set(value, {
+                    count: entry.count,
+                    categories: entry.categories,
+                    files: new Set(visibleFiles)
+                });
+            }
+        });
+        if (filteredByValue.size > 0) filtered.set(paramName, filteredByValue);
+    });
+    return filtered;
+}
+
+// ── helper: build clickable file-filter legend bar ───────────────────────────
+function _peBuildLegend(allFilesForLegend, fileColor) {
+    const hidden  = window._peHiddenFiles || new Set();
+    const legendEl = document.createElement('div');
+    legendEl.style.cssText = [
+        'display:flex', 'flex-wrap:wrap', 'gap:5px',
+        'padding:5px 10px', 'background:#f5f5f5',
+        'border-bottom:1px solid #e0e0e0',
+        'font-size:11px', 'color:#333', 'align-items:center'
+    ].join(';');
+    const lbl = document.createElement('span');
+    lbl.style.cssText = 'font-weight:600;color:#888;margin-right:4px;flex-shrink:0;font-size:10px;text-transform:uppercase;letter-spacing:.04em;';
+    lbl.textContent = 'Filter files:';
+    legendEl.appendChild(lbl);
+    allFilesForLegend.forEach(f => {
+        const isHidden = hidden.has(f);
+        const item = document.createElement('span');
+        item.title = isHidden ? `Click to show "${f}"` : `Click to hide "${f}"`;
+        item.style.cssText = [
+            'display:inline-flex', 'align-items:center', 'gap:4px',
+            'cursor:pointer', 'padding:2px 8px 2px 5px',
+            'border-radius:10px',
+            `border:1px solid ${isHidden ? '#ddd' : fileColor(f) + '66'}`,
+            `background:${isHidden ? '#f0f0f0' : 'white'}`,
+            `opacity:${isHidden ? '0.45' : '1'}`,
+            'transition:opacity .15s,border-color .15s',
+            'user-select:none'
+        ].join(';');
+        const sw = document.createElement('span');
+        sw.style.cssText = [
+            'width:10px', 'height:10px', 'border-radius:2px',
+            `background:${fileColor(f)}`, 'display:inline-block', 'flex-shrink:0'
+        ].join(';');
+        const txt = document.createElement('span');
+        txt.style.cssText = isHidden ? 'text-decoration:line-through;color:#aaa;' : '';
+        txt.textContent = f;
+        item.appendChild(sw);
+        item.appendChild(txt);
+        item.addEventListener('click', () => {
+            if (!window._peHiddenFiles) window._peHiddenFiles = new Set();
+            if (window._peHiddenFiles.has(f)) window._peHiddenFiles.delete(f);
+            else window._peHiddenFiles.add(f);
+            const cont = document.getElementById('paramExplorerTreemap');
+            const filtAgg = _peFilteredAgg();
+            if (paramExplorerZoomState) {
+                const byValue = filtAgg && filtAgg.get(paramExplorerZoomState);
+                if (byValue) _peRenderZoom(byValue, paramExplorerZoomState, cont);
+                else { paramExplorerZoomState = null; _peRenderOverview(filtAgg || new Map(), cont, false); }
+            } else {
+                _peRenderOverview(filtAgg || new Map(), cont, false);
+            }
+        });
+        legendEl.appendChild(item);
+    });
+    return legendEl;
+}
+
 // ── overview treemap (root → param → value) ───────────────────────────────────
 function _peRenderOverview(agg, container, isLive) {
     const params = [];
@@ -3165,6 +3982,20 @@ function _peRenderOverview(agg, container, isLive) {
         .domain(params.map(p => p.paramName))
         .range(_PE_PALETTE);
 
+    // Per-value coloring (fallback for single-file scenarios)
+    const allValueNames = params.flatMap(p => Array.from(p.byValue.keys()));
+    const valueColor = d3.scaleOrdinal().domain(allValueNames).range(_PE_PALETTE);
+
+    // Per-file coloring — stable scale from full unfiltered agg so colors don't shift when toggling
+    const allFiles = [...new Set(params.flatMap(p => [...p.byValue.values()].flatMap(e => [...e.files])))].sort();
+    const allFilesForLegend = (() => {
+        const src = window._paramExplorerAgg;
+        if (!src) return allFiles;
+        return [...new Set([...src.values()].flatMap(bv => [...bv.values()].flatMap(e => [...e.files])))].sort();
+    })();
+    const totalSelectedFiles = (example1State.fileSummary || []).filter(f => selectedEgIds.has(f.egId)).length;
+    const fileColor = d3.scaleOrdinal().domain(allFilesForLegend).range(_PE_PALETTE);
+
     const data = {
         name: 'Parameters',
         children: params.map(({ paramName, byValue }) => ({
@@ -3179,14 +4010,13 @@ function _peRenderOverview(agg, container, isLive) {
         }))
     };
 
-    const width       = Math.max(600, (container.clientWidth || 1100) - 4);
-    const totalLeaves = params.reduce((s, p) => s + p.byValue.size, 0);
-    const height      = Math.max(600, Math.min(3000, totalLeaves * 26 + params.length * 28));
+    const width  = Math.max(600, (container.clientWidth  || 1100) - 4);
+    const height = Math.max(200, (container.clientHeight || 600) - 4);
 
     const root = d3.hierarchy(data).sum(d => d.value || 0).sort((a, b) => b.value - a.value);
     d3.treemap()
         .size([width, height])
-        .paddingTop(d  => d.depth === 0 ? 0 : d.depth === 1 ? 22 : 0)
+        .paddingTop(d  => d.depth === 0 ? 0 : d.depth === 1 ? 32 : 0)
         .paddingRight( d => d.depth >= 1 ? 3 : 0)
         .paddingBottom(d => d.depth >= 1 ? 3 : 0)
         .paddingLeft(  d => d.depth >= 1 ? 3 : 0)
@@ -3203,23 +4033,82 @@ function _peRenderOverview(agg, container, isLive) {
     node.append('rect')
         .attr('width',  d => Math.max(0, d.x1 - d.x0))
         .attr('height', d => Math.max(0, d.y1 - d.y0))
-        .attr('fill', d => d.depth === 0 ? 'transparent' : color(d.depth === 1 ? d.data.name : d.data.paramName))
-        .attr('opacity', d => d.depth === 1 ? 0.28 : 0.88)
+        .attr('fill', d => {
+            if (d.depth === 0) return 'transparent';
+            if (d.depth === 1) return color(d.data.name);
+            const pav = (window._peParamAllowedValues || {})[d.data.paramName] || [];
+            if (pav.length > 0) return pav.includes(d.data.name) ? '#388e3c' : '#e53935';
+            if (allFilesForLegend.length > 1) {
+                const fs = d.data.files || [];
+                return fs.length === 1 ? fileColor(fs[0]) : '#9e9e9e';
+            }
+            return valueColor(d.data.name);
+        })
+        .attr('opacity', d => d.depth === 1 ? 0.15 : 0.88)
         .attr('stroke', 'white')
         .attr('stroke-width', d => d.depth === 1 ? 2 : 1)
         .attr('rx', d => d.depth <= 1 ? 4 : 2);
 
-    // Depth-1 parameter header — clickable to zoom in
+    // Depth-1 parameter header — label + "Check Compliance" button
     node.filter(d => d.depth === 1).each(function(d) {
         const w = d.x1 - d.x0, h = d.y1 - d.y0;
         if (w < 22 || h < 16) return;
-        const maxChars = Math.max(4, Math.floor(w / 7.5));
-        const label    = d.data.name.length > maxChars ? d.data.name.slice(0, maxChars - 1) + '…' : d.data.name;
-        d3.select(this).append('text')
-            .attr('x', 5).attr('y', 15)
-            .text(label + (w > 120 ? '  ⊕' : ''))
-            .attr('font-size', '11px').attr('fill', '#111').attr('font-weight', '700')
+        const g = d3.select(this);
+        const paramFileSet = new Set((d.children || []).flatMap(c => c.data.files || []));
+        const fileSuffix = totalSelectedFiles > 1 ? `  ·  ${paramFileSet.size}/${totalSelectedFiles} files` : '';
+
+        // Per-param compliance state
+        const pav = (window._peParamAllowedValues || {})[d.data.name] || [];
+        let compSuffix = '';
+        if (pav.length > 0 && d.children) {
+            let ok = 0, notOk = 0;
+            d.children.forEach(c => { pav.includes(c.data.name) ? ok += c.data.value : notOk += c.data.value; });
+            compSuffix = `  ✓${ok.toLocaleString()} ✗${notOk.toLocaleString()}`;
+        }
+
+        // "Check Compliance" button dimensions
+        const btnLabel = pav.length > 0 ? '✓ Active' : 'Check Compliance';
+        const btnW = pav.length > 0 ? 74 : 124;
+        const btnH = 28;
+        const showBtn = w >= btnW + 24 && h >= 34;
+
+        const reservedRight = showBtn ? btnW + 8 : 6;
+        const maxChars = Math.max(4, Math.floor((w - reservedRight - 6) / 7.2));
+        const label = d.data.name.length > maxChars ? d.data.name.slice(0, maxChars - 1) + '…' : d.data.name;
+
+        g.append('text')
+            .attr('x', 5).attr('y', 20)
+            .text(label + (w > 140 ? fileSuffix + compSuffix : ''))
+            .attr('font-size', '11px')
+            .attr('fill', pav.length > 0 ? '#1565c0' : '#111')
+            .attr('font-weight', '700')
             .style('pointer-events', 'none');
+
+        if (showBtn) {
+            const bx = w - btnW - 4;
+            const by = 2;
+            const btnG = g.append('g')
+                .style('cursor', 'pointer')
+                .style('pointer-events', 'all')
+                .on('click', function(event) {
+                    event.stopPropagation();
+                    _peShowCompliancePopover(event, d.data.name);
+                });
+            btnG.append('rect')
+                .attr('x', bx).attr('y', by)
+                .attr('width', btnW).attr('height', btnH)
+                .attr('rx', 3)
+                .attr('fill', pav.length > 0 ? '#2e7d32' : '#0696d7')
+                .attr('opacity', 0.92);
+            btnG.append('text')
+                .attr('x', bx + btnW / 2).attr('y', by + btnH / 2 + 4)
+                .attr('text-anchor', 'middle')
+                .text(btnLabel)
+                .attr('font-size', '11px')
+                .attr('fill', 'white')
+                .attr('font-weight', '600')
+                .style('pointer-events', 'none');
+        }
     });
     node.filter(d => d.depth === 1)
         .style('cursor', 'zoom-in')
@@ -3254,14 +4143,16 @@ function _peRenderOverview(agg, container, isLive) {
         }
     });
     node.filter(d => d.depth === 2)
-        .style('cursor', 'default')
+        .style('cursor', 'zoom-in')
+        .on('click', (event, d) => { event.stopPropagation(); paramExplorerZoomIn(d.data.paramName); })
         .on('mousemove', (event, d) => {
             _peShowTooltip(event,
                 `<div style="font-weight:700;font-size:13px;margin-bottom:4px;">${d.data.paramName}</div>` +
                 `<div><span style="opacity:.7">Value:</span> <strong>${d.data.name}</strong></div>` +
                 `<div><span style="opacity:.7">Elements:</span> <strong>${d.data.value.toLocaleString()}</strong></div>` +
                 `<div><span style="opacity:.7">Categories:</span> ${(d.data.categories || []).join(', ') || '—'}</div>` +
-                `<div><span style="opacity:.7">Files:</span> ${(d.data.files || []).join(', ') || '—'}</div>`
+                `<div><span style="opacity:.7">Files:</span> ${(d.data.files || []).join(', ') || '—'}</div>` +
+                `<div style="opacity:.6;font-size:10px;margin-top:4px;">Click to explore all values ›</div>`
             );
         })
         .on('mouseout', _peHideTooltip);
@@ -3276,7 +4167,89 @@ function _peRenderOverview(agg, container, isLive) {
     }
 
     container.innerHTML = '';
+    if (allFilesForLegend.length > 1) {
+        container.appendChild(_peBuildLegend(allFilesForLegend, fileColor));
+    }
     container.appendChild(svg.node());
+}
+
+// ── Open viewer for a specific param=value (from zoom-view tile click) ────────
+async function _peOpenValueInViewer(paramName, value, fileNames) {
+    // Map file names back to fileSummary entries that have a viewable URN
+    const candidates = (example1State.fileSummary || [])
+        .filter(f => (fileNames || []).includes(f.egName) && f.fileVersionUrn);
+
+    if (candidates.length === 0) {
+        alert('No viewable file found for this value. The file may not have a URN yet.');
+        return;
+    }
+
+    // If multiple files contain this value, use the first one
+    // (future: could show a picker)
+    const fileEntry = candidates[0];
+    // Resolve to API name (e.g. 'Fire_Resistance_Rating' → 'Fire Resistance Rating')
+    const apiParamName = (window._paramApiNameCache[fileEntry.egId]?.get(paramName)) || paramName;
+    const loading = document.getElementById('paramExplorerLoading');
+    const progress = document.getElementById('paramExplorerProgress');
+    loading.style.display = 'flex';
+    progress.textContent = `Fetching elements with "${paramName} = ${value}" in ${fileEntry.egName}…`;
+
+    const isV1 = example1State.version === 'v1';
+    const dataKey = isV1 ? 'elementsByElementGroupAtVersion' : 'elementsByElementGroup';
+    // Use apiParamName (spaces form) for filter — the API requires the normalised name
+    const propPath = /\s/.test(apiParamName)
+        ? `'property.name.${apiParamName.replace(/'/g, "\\'")}'`
+        : `property.name.${apiParamName.replace(/'/g, "\\'")}`;
+    const escapedValue = String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    const filterQuery = `${propPath}=='${escapedValue}'`;
+
+    const gql = isV1
+        ? `query GetElsByVal($elementGroupId: ID!, $filter: ElementFilterInput, $pagination: PaginationInput) {
+            elementsByElementGroupAtVersion(elementGroupId: $elementGroupId, versionNumber: 1, filter: $filter, pagination: $pagination) {
+                pagination { cursor }
+                results { properties(pagination: { limit: 50 }) { results { name value } } }
+            } }`
+        : `query GetElsByVal($elementGroupId: ID!, $filter: ElementFilterInput, $pagination: PaginationInput) {
+            elementsByElementGroup(elementGroupId: $elementGroupId, filter: $filter, pagination: $pagination) {
+                pagination { cursor }
+                results { properties(pagination: { limit: 50 }) { results { name value } } }
+            } }`;
+
+    const revitIds = [];
+    let cursor = null;
+    try {
+        do {
+            const r = await executeGraphQLQuery(gql, {
+                elementGroupId: fileEntry.egId,
+                filter: { query: filterQuery },
+                pagination: cursor ? { cursor, limit: 100 } : { limit: 100 }
+            }, example1State.region);
+            const data = r.data?.[dataKey];
+            for (const el of (data?.results || [])) {
+                const revitId = (el.properties?.results || []).find(p => p.name === 'Revit Element ID')?.value;
+                if (revitId != null && String(revitId).trim() !== '') revitIds.push(String(revitId));
+            }
+            cursor = data?.pagination?.cursor || null;
+        } while (cursor);
+    } catch (err) {
+        loading.style.display = 'none';
+        alert(`Failed to fetch elements: ${err.message}`);
+        return;
+    }
+
+    loading.style.display = 'none';
+
+    if (revitIds.length === 0) {
+        alert(`No elements found for "${paramName} = ${value}" in ${fileEntry.egName}.`);
+        return;
+    }
+
+    // Hand off to viewer (same mechanism as zoom-view "Show in Viewer")
+    pendingRevitElementIds = revitIds;
+    pendingRevitCategory = null;   // search all categories in viewer
+    currentRegion = example1State.region;
+    openViewerModal([{ id: fileEntry.egId, name: fileEntry.egName,
+        alternativeIdentifiers: { fileVersionUrn: fileEntry.fileVersionUrn } }]);
 }
 
 // ── zoom treemap (flat: root → values for one parameter) ─────────────────────
@@ -3294,9 +4267,16 @@ function _peRenderZoom(byValue, paramName, container) {
         return;
     }
 
-    // Color by category of each value
-    const allCats = [...new Set(values.flatMap(v => v.categories))].sort();
-    const catColor = d3.scaleOrdinal().domain(allCats).range(_PE_PALETTE);
+    // Per-file coloring — stable scale from full unfiltered agg so colors don't shift when toggling
+    const allFiles = [...new Set(values.flatMap(v => v.files))].sort();
+    const allFilesForLegend = (() => {
+        const src = window._paramExplorerAgg;
+        if (!src) return allFiles;
+        return [...new Set([...src.values()].flatMap(bv => [...bv.values()].flatMap(e => [...e.files])))].sort();
+    })();
+    const totalSelectedFiles = (example1State.fileSummary || []).filter(f => selectedEgIds.has(f.egId)).length;
+    const fileColor  = d3.scaleOrdinal().domain(allFilesForLegend).range(_PE_PALETTE);
+    const valueColor = d3.scaleOrdinal().domain(values.map(v => v.value)).range(_PE_PALETTE);
 
     const data = {
         name: paramName,
@@ -3306,8 +4286,8 @@ function _peRenderZoom(byValue, paramName, container) {
         }))
     };
 
-    const width  = Math.max(600, (container.clientWidth || 1100) - 4);
-    const height = Math.max(500, Math.min(2400, values.length * 40 + 40));
+    const width  = Math.max(600, (container.clientWidth  || 1100) - 4);
+    const height = Math.max(200, (container.clientHeight || 600) - 4);
 
     const root = d3.hierarchy(data).sum(d => d.value || 0).sort((a, b) => b.value - a.value);
     d3.treemap()
@@ -3322,12 +4302,20 @@ function _peRenderZoom(byValue, paramName, container) {
         .join('g')
         .attr('transform', d => `translate(${d.x0},${d.y0})`)
         .attr('data-peval', d => d.data.name)
-        .style('cursor', 'default');
+        .style('cursor', 'pointer');
 
     node.append('rect')
         .attr('width',  d => Math.max(0, d.x1 - d.x0))
         .attr('height', d => Math.max(0, d.y1 - d.y0))
-        .attr('fill', d => catColor(d.data.categories?.[0] || '—'))
+        .attr('fill', d => {
+            const pav = (window._peParamAllowedValues || {})[paramName] || [];
+            if (pav.length > 0) return pav.includes(d.data.name) ? '#388e3c' : '#e53935';
+            if (allFilesForLegend.length > 1) {
+                const fs = d.data.files || [];
+                return fs.length === 1 ? fileColor(fs[0]) : '#9e9e9e';
+            }
+            return valueColor(d.data.name);
+        })
         .attr('opacity', 0.88)
         .attr('stroke', 'white')
         .attr('stroke-width', 1)
@@ -3347,7 +4335,7 @@ function _peRenderZoom(byValue, paramName, container) {
 
         if (h >= 30) {
             g.append('text').attr('x', 6).attr('y', 28)
-                .text(`${d.data.count.toLocaleString()} element${d.data.count !== 1 ? 's' : ''}`)
+                .text(d.data.value.toLocaleString())
                 .attr('font-size', '9px').attr('fill', '#333')
                 .style('pointer-events', 'none');
         }
@@ -3361,31 +4349,26 @@ function _peRenderZoom(byValue, paramName, container) {
         }
     });
 
+    node.on('click', (event, d) => {
+        _peOpenValueInViewer(paramName, d.data.name, d.data.files);
+    });
     node.on('mousemove', (event, d) => {
         _peShowTooltip(event,
             `<div style="font-weight:700;font-size:13px;margin-bottom:4px;">${paramName}</div>` +
             `<div><span style="opacity:.7">Value:</span> <strong>${d.data.name}</strong></div>` +
-            `<div><span style="opacity:.7">Elements:</span> <strong>${d.data.count.toLocaleString()}</strong></div>` +
-            `<div><span style="opacity:.7">Categories:</span> ${d.data.categories.join(', ') || '—'}</div>` +
-            `<div><span style="opacity:.7">Files:</span> ${d.data.files.join(', ') || '—'}</div>`
+            `<div><span style="opacity:.7">Elements:</span> <strong>${d.data.value.toLocaleString()}</strong></div>` +
+            `<div><span style="opacity:.7">Categories:</span> ${(d.data.categories || []).join(', ') || '—'}</div>` +
+            `<div><span style="opacity:.7">Files:</span> ${(d.data.files || []).join(', ') || '—'}</div>` +
+            `<div style="opacity:.6;font-size:10px;margin-top:4px;">Click to open in Viewer ►</div>`
         );
     }).on('mouseout', _peHideTooltip);
 
-    // Legend (categories)
-    if (allCats.length > 0) {
-        const legendG = svg.append('g').attr('transform', `translate(4,${height - 18})`);
-        let x = 0;
-        allCats.slice(0, 10).forEach(cat => {
-            if (x > width - 10) return;
-            legendG.append('rect').attr('x', x).attr('y', 0)
-                .attr('width', 10).attr('height', 10)
-                .attr('fill', catColor(cat)).attr('rx', 2);
-            legendG.append('text').attr('x', x + 13).attr('y', 9)
-                .text(cat).attr('font-size', '9px').attr('fill', '#444');
-            x += Math.min(cat.length * 6.5 + 22, 180);
-        });
-    }
+
 
     container.innerHTML = '';
+    if (allFilesForLegend.length > 1) {
+        container.appendChild(_peBuildLegend(allFilesForLegend, fileColor));
+    }
+    container.appendChild(_peBuildParamComplianceBar(paramName));
     container.appendChild(svg.node());
 }
