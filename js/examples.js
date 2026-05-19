@@ -107,7 +107,7 @@ async function buildProjectElementGroupMap(hubId, region) {
                     const data = egResult.data?.elementGroupsByProject;
                     (data?.results || []).forEach(eg => {
                         map[eg.id] = project.name;
-                        list.push({ id: eg.id, name: eg.name, projectName: project.name, fileVersionUrn: eg.alternativeIdentifiers?.fileVersionUrn || null });
+                        list.push({ id: eg.id, name: eg.name, projectName: project.name, projectId: project.id, fileVersionUrn: eg.alternativeIdentifiers?.fileVersionUrn || null });
                     });
                     egCursor = data?.pagination?.cursor || null;
                 } catch (err) {
@@ -212,6 +212,7 @@ async function executeExample1() {
     window._paramNamesCache    = {};   // reset prefetch cache on new query
     window._paramApiNameCache  = {};
     window._paramNamesPromises = {};
+    window._paramTypeCache     = {};   // reset param type cache
     const smBtn = document.getElementById('selectModeBtn');
     if (smBtn) { smBtn.style.display = 'none'; smBtn.classList.remove('active'); }
     updateViewerButton();
@@ -250,12 +251,13 @@ async function executeExample1() {
 window._paramNamesCache    = window._paramNamesCache    || {};
 window._paramApiNameCache  = window._paramApiNameCache  || {};
 window._paramNamesPromises = window._paramNamesPromises || {};
+window._paramTypeCache     = window._paramTypeCache     || {}; // egId → Map<name, typeStr>
 
 const _propDefQuery = `
     query GetPropDefs($elementGroupId: ID!, $pagination: PaginationInput) {
         propertyDefinitionsByElementGroup(elementGroupId: $elementGroupId, pagination: $pagination) {
             pagination { cursor }
-            results { name }
+            results { name id specification }
         }
     }`;
 
@@ -297,7 +299,13 @@ function _prefetchParamNames(egId, region) {
                 }, region);
                 const data = r.data?.propertyDefinitionsByElementGroup;
                 for (const def of (data?.results || [])) {
-                    if (def.name) { names.add(def.name); apiMap.set(def.name, def.name); }
+                    if (!def.name) continue;
+                    names.add(def.name);
+                    apiMap.set(def.name, def.name);
+                    if (def.specification) {
+                        if (!window._paramTypeCache[egId]) window._paramTypeCache[egId] = new Map();
+                        window._paramTypeCache[egId].set(def.name, def.specification);
+                    }
                 }
                 cursor = data?.pagination?.cursor || null;
             } catch (_) { cursor = null; }
@@ -414,7 +422,7 @@ async function executeLatestQuery(hubId, category, region) {
             if (noCategory) {
                 // No category filter — list all files immediately, equal-size tiles
                 for (const eg of egs) {
-                    fileSummary.push({ egId: eg.id, egName: eg.name, projectName: project.name, count: 1, hasMore: false, fileVersionUrn: eg.fileVersionUrn });
+                    fileSummary.push({ egId: eg.id, egName: eg.name, projectName: project.name, projectId: project.id, count: 1, hasMore: false, fileVersionUrn: eg.fileVersionUrn });
                     _prefetchParamNames(eg.id, region);  // fire-and-forget
                 }
                 scanned += egs.length;
@@ -430,7 +438,7 @@ async function executeLatestQuery(hubId, category, region) {
                         const count = data?.results?.length || 0;
                         const hasMore = !!(data?.pagination?.cursor);
                         if (count > 0) {
-                            fileSummary.push({ egId: eg.id, egName: eg.name, projectName: project.name, count, hasMore, fileVersionUrn: eg.fileVersionUrn });
+                            fileSummary.push({ egId: eg.id, egName: eg.name, projectName: project.name, projectId: project.id, count, hasMore, fileVersionUrn: eg.fileVersionUrn });
                             _prefetchParamNames(eg.id, region);  // fire-and-forget
                             createTreemapVisualization([...fileSummary], category);
                             await new Promise(r => setTimeout(r, 0));
@@ -516,7 +524,7 @@ async function executeV1Query(hubId, category, region) {
 
         if (noCategory) {
             for (const eg of egs) {
-                fileSummary.push({ egId: eg.id, egName: eg.name, projectName: project.name, count: 1, hasMore: false, fileVersionUrn: eg.fileVersionUrn });
+                fileSummary.push({ egId: eg.id, egName: eg.name, projectName: project.name, projectId: project.id, count: 1, hasMore: false, fileVersionUrn: eg.fileVersionUrn });
                 _prefetchParamNames(eg.id, region);  // fire-and-forget
             }
             scanned += egs.length;
@@ -533,7 +541,7 @@ async function executeV1Query(hubId, category, region) {
                 const count = data?.results?.length || 0;
                 const hasMore = !!(data?.pagination?.cursor);
                 if (count > 0) {
-                    fileSummary.push({ egId: eg.id, egName: eg.name, projectName: project.name, count, hasMore, fileVersionUrn: eg.fileVersionUrn });
+                    fileSummary.push({ egId: eg.id, egName: eg.name, projectName: project.name, projectId: project.id, count, hasMore, fileVersionUrn: eg.fileVersionUrn });
                     _prefetchParamNames(eg.id, region);  // fire-and-forget
                     createTreemapVisualization([...fileSummary], category);
                     await new Promise(r => setTimeout(r, 0)); // yield for repaint
@@ -3054,6 +3062,8 @@ async function openParameterExplorer() {
     treemapDiv.innerHTML  = '';
     paramExplorerZoomState = null;
     window._paramExplorerAgg = null;
+    window._pePickerTypeGroups = null;
+    window._pePickerSelected   = new Set();
     window._peHiddenFiles = new Set();
     window._peAllowedValues = [];
     window._peParamAllowedValues = {};
@@ -3066,85 +3076,361 @@ async function openParameterExplorer() {
 
     const region = example1State.region;
 
-    // ── Phase 1: collect param names ────────────────────────────────────────
-    // For files whose fetch hasn't completed yet, await the in-progress promise
-    // (or start a new one).  This correctly handles the race where the background
-    // prefetch started but hasn't finished yet — the old code read an empty Set
-    // and thought it was done.
+    // ── Phase 1: collect param names (dynamic fillup) ────────────────────────
+    // Build a live paramFileMap from whatever is cached already, then fetch the
+    // rest file-by-file, refreshing the picker treemap after each one completes.
+
+    function _buildParamFileMap() {
+        const map = new Map();
+        for (const f of selectedFiles) {
+            const names = window._paramNamesCache[f.egId] || new Set();
+            for (const name of names) {
+                if (!map.has(name)) map.set(name, new Set());
+                map.get(name).add(f.egId);
+            }
+        }
+        return map;
+    }
+
     const notReady = selectedFiles.filter(f => !window._paramNamesCache[f.egId]);
+    let doneCount = 0;
+
+    // Show picker immediately with whatever is already cached, then hide loading
+    loading.style.display = 'none';
+    if (searchInput) searchInput.style.display = '';
+    const initialMap = _buildParamFileMap();
+    const totalParams0 = initialMap.size;
     if (notReady.length > 0) {
-        let done = 0;
+        subtitle.textContent = `${n} file${n !== 1 ? 's' : ''} · ${totalParams0} params (loading ${notReady.length} more…)`;
+    } else {
+        subtitle.textContent = `${n} file${n !== 1 ? 's' : ''} · ${totalParams0} parameters — select which to explore`;
+    }
+    _peRenderChecklist(initialMap, selectedFiles, treemapDiv);
+
+    if (notReady.length > 0) {
         const CONCURRENCY = 4;
         for (let i = 0; i < notReady.length; i += CONCURRENCY) {
             if (modal.style.display === 'none') return;
             await Promise.all(notReady.slice(i, i + CONCURRENCY).map(async f => {
-                await _prefetchParamNames(f.egId, region);   // awaits existing promise if in-flight
-                done++;
-                progress.textContent = `Collecting parameter names: ${done} / ${notReady.length} files…`;
+                await _prefetchParamNames(f.egId, region);
+                doneCount++;
+                if (modal.style.display === 'none') return;
+                const map = _buildParamFileMap();
+                const remaining = notReady.length - doneCount;
+                subtitle.textContent = remaining > 0
+                    ? `${n} file${n !== 1 ? 's' : ''} · ${map.size} params (loading ${remaining} more…)`
+                    : `${n} file${n !== 1 ? 's' : ''} · ${map.size} parameters — select which to explore`;
+                _pePicker_RefreshData(map, selectedFiles);
             }));
         }
     }
 
     if (modal.style.display === 'none') return;
-    loading.style.display = 'none';
-
-    // ── Phase 2: build aggregated param list across all selected files ────────
-    // paramName → Set of egIds that have it
-    const paramFileMap = new Map();
-    for (const f of selectedFiles) {
-        const names = window._paramNamesCache[f.egId] || new Set();
-        for (const name of names) {
-            if (!paramFileMap.has(name)) paramFileMap.set(name, new Set());
-            paramFileMap.get(name).add(f.egId);
-        }
-    }
-
-    const totalParams = paramFileMap.size;
-    subtitle.textContent = `${n} file${n !== 1 ? 's' : ''} · ${totalParams} parameters — select which to explore`;
-
-    // Render the checklist
-    _peRenderChecklist(paramFileMap, selectedFiles, treemapDiv);
-    if (searchInput) searchInput.style.display = '';
 }
 
 function _peRenderChecklist(paramFileMap, selectedFiles, container) {
-    // Store state so compliance back-navigation can re-render
     window._peLastChecklistState = { paramFileMap, selectedFiles };
+    window._pePickerSelected = new Set();
+    window._pePickerZoom     = null;
+    window._pePickerNFiles   = selectedFiles.length;
 
-    // Sort: params present in most files first, then alphabetically
-    const params = Array.from(paramFileMap.entries())
-        .map(([name, egIds]) => ({ name, fileCount: egIds.size }))
-        .sort((a, b) => b.fileCount - a.fileCount || a.name.localeCompare(b.name));
-
-    const n = selectedFiles.length;
+    // Build type groups: typeName → [{name, fileCount}]
+    const typeGroups = new Map();
+    for (const [name, egIds] of paramFileMap.entries()) {
+        const tl = _peParamTypeLabel(name) || 'Other';
+        if (!typeGroups.has(tl)) typeGroups.set(tl, []);
+        typeGroups.get(tl).push({ name, fileCount: egIds.size });
+    }
+    for (const [, params] of typeGroups) {
+        params.sort((a, b) => b.fileCount - a.fileCount || a.name.localeCompare(b.name));
+    }
+    window._pePickerTypeGroups   = typeGroups;
+    window._pePickerParamFileMap = paramFileMap;
 
     container.innerHTML = `
-        <div id="peChecklist">
-            <div id="peChecklistToolbar">
-                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
-                    <input type="checkbox" id="peSelectAll" onchange="_peToggleAll(this.checked)">
-                    <span>Select all (${params.length})</span>
-                </label>
-                <span id="peSelectedCount" style="color:#1565c0;font-weight:600;">0 selected</span>
-                <button class="btn btn-execute" style="margin-left:auto;padding:7px 18px;"
-                    onclick="_peLoadCheckedValues()">
-                    Load Values &#8594;
-                </button>
+        <div id="pePickerWrap">
+            <div id="pePickerLeft">
+                <div id="pePickerBreadcrumb">
+                    <span class="pe-crumb" onclick="_pePicker_BackToTypes()">All Types<span style="opacity:0.6;font-weight:400;margin-left:4px;">(${typeGroups.size})</span></span>
+                    <span id="pePickerCrumbSep" style="display:none;color:#aaa;padding:0 6px;">›</span>
+                    <span id="pePickerCrumbType" style="display:none;font-weight:700;color:#3c3c3c;"></span>
+                    <span id="pePickerCrumbSelAll" style="display:none;margin-left:auto;font-size:11px;color:#0696d7;cursor:pointer;padding:2px 6px;border-radius:3px;background:#e8f4fc;" onclick="_pePicker_SelectAllInType()">Select all in type</span>
+                </div>
+                <div id="pePickerTreemapArea"></div>
             </div>
-            <div id="peChecklistBody">
-                ${params.map(p => `
-                    <label class="pe-param-row">
-                        <input type="checkbox" class="pe-param-cb" value="${_peEsc(p.name)}"
-                            onchange="_peCountSelected()">
-                        <span class="pe-param-name">${_peEsc(p.name)}</span>
-                        <span class="pe-param-files">${p.fileCount === n ? 'all files' : `${p.fileCount} / ${n} files`}</span>
-                    </label>`).join('')}
+            <div id="pePickerRight">
+                <div id="pePickerRightHeader">
+                    <span id="pePickerSelCount" style="font-weight:600;color:#0696d7;">0 selected</span>
+                    <button onclick="_pePicker_ClearAll()">✕ Clear</button>
+                </div>
+                <div id="pePickerSelectedList">
+                    <div id="pePickerEmptyHint">Click parameter tiles<br>to add them here</div>
+                </div>
+                <div id="pePickerRightFooter">
+                    <button id="pePickerLoadBtn" class="btn btn-execute" disabled
+                        onclick="_peLoadCheckedValues()">
+                        Load Values &#8594;
+                    </button>
+                </div>
             </div>
         </div>`;
+
+    _pePicker_DrawTypeOverview();
+
+    // Resize observer — redraw SVG when container changes size
+    const area = document.getElementById('pePickerTreemapArea');
+    if (area) {
+        if (area._ro) area._ro.disconnect();
+        const ro = new ResizeObserver(() => {
+            if (window._pePickerZoom) _pePicker_DrawTypeZoom(window._pePickerZoom);
+            else _pePicker_DrawTypeOverview();
+        });
+        ro.observe(area);
+        area._ro = ro;
+    }
+}
+
+// ── Type overview treemap ─────────────────────────────────────────────────────
+function _pePicker_DrawTypeOverview() {
+    window._pePickerZoom = null;
+    const crumbSep  = document.getElementById('pePickerCrumbSep');
+    const crumbType = document.getElementById('pePickerCrumbType');
+    const crumbSelAll = document.getElementById('pePickerCrumbSelAll');
+    if (crumbSep)    crumbSep.style.display    = 'none';
+    if (crumbType)   crumbType.style.display   = 'none';
+    if (crumbSelAll) crumbSelAll.style.display = 'none';
+
+    const area = document.getElementById('pePickerTreemapArea');
+    if (!area) return;
+    const { width: W, height: H } = area.getBoundingClientRect();
+    if (W < 10 || H < 10) return;
+
+    const typeGroups = window._pePickerTypeGroups || new Map();
+    const tgArr = Array.from(typeGroups.entries()).sort((a, b) => b[1].length - a[1].length);
+
+    const hier = d3.hierarchy({ name: 'root', children: tgArr.map(([tn, ps]) => ({ name: tn, value: ps.length })) })
+        .sum(d => d.value || 0);
+    d3.treemap().size([W, H]).padding(4).round(true)(hier);
+
+    area.innerHTML = '';
+    const svg = d3.select(area).append('svg').attr('width', W).attr('height', H);
+    const tw = d => d.x1 - d.x0;
+    const th = d => d.y1 - d.y0;
+
+    const cells = svg.selectAll('g')
+        .data(hier.leaves()).join('g')
+        .attr('transform', d => `translate(${d.x0},${d.y0})`)
+        .style('cursor', 'pointer')
+        .on('click', (e, d) => _pePicker_ZoomToType(d.data.name));
+
+    cells.append('rect')
+        .attr('width', tw).attr('height', th)
+        .attr('rx', 5).attr('ry', 5)
+        .attr('fill', d => _peTypeBadgeColor(d.data.name))
+        .attr('opacity', 0.88);
+
+    cells.filter(d => tw(d) > 40 && th(d) > 24)
+        .append('text').attr('x', 10).attr('y', 22)
+        .attr('fill', 'white')
+        .attr('font-size', d => Math.min(15, Math.max(9, tw(d) / 8)) + 'px')
+        .attr('font-weight', '700')
+        .attr('font-family', "'ArtifaktElement','Helvetica Neue',Arial,sans-serif")
+        .style('pointer-events', 'none')
+        .text(d => d.data.name);
+
+    cells.filter(d => tw(d) > 40 && th(d) > 44)
+        .append('text').attr('x', 10).attr('y', 38)
+        .attr('fill', 'rgba(255,255,255,0.72)').attr('font-size', '11px')
+        .attr('font-family', "'ArtifaktElement','Helvetica Neue',Arial,sans-serif")
+        .style('pointer-events', 'none')
+        .text(d => `${d.data.value} param${d.data.value !== 1 ? 's' : ''}`);
+
+    cells.filter(d => tw(d) > 100 && th(d) > 60)
+        .append('text').attr('x', 10).attr('y', d => th(d) - 10)
+        .attr('fill', 'rgba(255,255,255,0.45)').attr('font-size', '9px')
+        .attr('font-family', "'ArtifaktElement','Helvetica Neue',Arial,sans-serif")
+        .style('pointer-events', 'none').text('click to explore →');
+
+    cells
+        .on('mouseenter', function() { d3.select(this).select('rect').attr('opacity', 1); })
+        .on('mouseleave', function() { d3.select(this).select('rect').attr('opacity', 0.88); });
+}
+
+// ── Zoom into one type (individual param tiles) ───────────────────────────────
+function _pePicker_ZoomToType(typeName) {
+    window._pePickerZoom = typeName;
+    const crumbSep    = document.getElementById('pePickerCrumbSep');
+    const crumbType   = document.getElementById('pePickerCrumbType');
+    const crumbSelAll = document.getElementById('pePickerCrumbSelAll');
+    if (crumbSep)    crumbSep.style.display    = '';
+    if (crumbType)   { crumbType.style.display = ''; crumbType.textContent = typeName; }
+    if (crumbSelAll) crumbSelAll.style.display = '';
+    _pePicker_DrawTypeZoom(typeName);
+}
+
+function _pePicker_DrawTypeZoom(typeName) {
+    const area = document.getElementById('pePickerTreemapArea');
+    if (!area) return;
+    const { width: W, height: H } = area.getBoundingClientRect();
+    if (W < 10 || H < 10) return;
+
+    const params   = (window._pePickerTypeGroups || new Map()).get(typeName) || [];
+    const selected = window._pePickerSelected || new Set();
+    const n        = window._pePickerNFiles || 1;
+    const typeColor = _peTypeBadgeColor(typeName);
+
+    const hier = d3.hierarchy({ name: 'root', children: params.map(p => ({ name: p.name, value: Math.max(p.fileCount, 1), fileCount: p.fileCount })) })
+        .sum(d => d.value || 0);
+    d3.treemap().size([W, H]).padding(2).round(true)(hier);
+
+    area.innerHTML = '';
+    const svg = d3.select(area).append('svg').attr('width', W).attr('height', H);
+    const tw = d => d.x1 - d.x0;
+    const th = d => d.y1 - d.y0;
+
+    const cells = svg.selectAll('g')
+        .data(hier.leaves()).join('g')
+        .attr('transform', d => `translate(${d.x0},${d.y0})`)
+        .attr('data-pname', d => d.data.name)
+        .style('cursor', 'pointer')
+        .on('click', (e, d) => _pePicker_ToggleParam(d.data.name));
+
+    cells.append('rect')
+        .attr('width', tw).attr('height', th)
+        .attr('rx', 4).attr('ry', 4)
+        .attr('fill',         d => selected.has(d.data.name) ? '#dceefb' : '#f4f6f8')
+        .attr('stroke',       d => selected.has(d.data.name) ? typeColor  : '#d5dbe1')
+        .attr('stroke-width', d => selected.has(d.data.name) ? 2 : 1);
+
+    cells.filter(d => tw(d) > 28 && th(d) > 18)
+        .append('text').attr('x', 6).attr('y', 15)
+        .attr('fill', d => selected.has(d.data.name) ? typeColor : '#3c3c3c')
+        .attr('font-size', d => Math.min(12, Math.max(9, Math.min(tw(d) / 9, 12))) + 'px')
+        .attr('font-weight', d => selected.has(d.data.name) ? '700' : '400')
+        .attr('font-family', "'ArtifaktElement','Helvetica Neue',Arial,sans-serif")
+        .style('pointer-events', 'none')
+        .each(function(d) {
+            const maxCh = Math.max(4, Math.floor(tw(d) / 6.5));
+            const nm = d.data.name;
+            d3.select(this).text(nm.length > maxCh ? nm.slice(0, maxCh - 1) + '…' : nm);
+        });
+
+    if (n > 1) {
+        cells.filter(d => tw(d) > 50 && th(d) > 30)
+            .append('text').attr('x', 6).attr('y', 27)
+            .attr('fill', '#999').attr('font-size', '9px')
+            .attr('font-family', "'ArtifaktElement','Helvetica Neue',Arial,sans-serif")
+            .style('pointer-events', 'none')
+            .text(d => d.data.fileCount === n ? 'all files' : `${d.data.fileCount}/${n} files`);
+    }
+
+    cells.filter(d => selected.has(d.data.name) && tw(d) > 18 && th(d) > 18)
+        .append('text').attr('x', d => tw(d) - 14).attr('y', 14)
+        .attr('fill', typeColor).attr('font-size', '11px')
+        .style('pointer-events', 'none').text('✓');
+
+    cells
+        .on('mouseenter', function(e, d) {
+            d3.select(this).select('rect').attr('fill', selected.has(d.data.name) ? '#c8e4f7' : '#eaecf0');
+        })
+        .on('mouseleave', function(e, d) {
+            d3.select(this).select('rect').attr('fill', selected.has(d.data.name) ? '#dceefb' : '#f4f6f8');
+        });
+}
+
+// ── Picker selection helpers ──────────────────────────────────────────────────
+function _pePicker_ToggleParam(paramName) {
+    const sel = window._pePickerSelected || (window._pePickerSelected = new Set());
+    if (sel.has(paramName)) sel.delete(paramName); else sel.add(paramName);
+    if (window._pePickerZoom) _pePicker_DrawTypeZoom(window._pePickerZoom);
+    _pePicker_UpdatePanel();
+}
+
+function _pePicker_SelectAllInType() {
+    const typeName = window._pePickerZoom;
+    if (!typeName) return;
+    const params = (window._pePickerTypeGroups || new Map()).get(typeName) || [];
+    const sel = window._pePickerSelected || (window._pePickerSelected = new Set());
+    params.forEach(p => sel.add(p.name));
+    _pePicker_DrawTypeZoom(typeName);
+    _pePicker_UpdatePanel();
+}
+
+function _pePicker_UpdatePanel() {
+    const sel = window._pePickerSelected || new Set();
+    const n   = sel.size;
+    const countEl = document.getElementById('pePickerSelCount');
+    if (countEl) countEl.textContent = `${n} selected`;
+    const loadBtn = document.getElementById('pePickerLoadBtn');
+    if (loadBtn) loadBtn.disabled = (n === 0);
+    const listEl = document.getElementById('pePickerSelectedList');
+    if (!listEl) return;
+    if (n === 0) {
+        listEl.innerHTML = '<div id="pePickerEmptyHint">Click parameter tiles<br>to add them here</div>';
+        return;
+    }
+    listEl.innerHTML = Array.from(sel).map(name =>
+        `<div class="pe-picker-chip">
+            <span title="${_peEsc(name)}">${_peEsc(name)}</span>
+            <button onclick="_pePicker_RemoveParam(${JSON.stringify(name)})" title="Remove">✕</button>
+        </div>`
+    ).join('');
+}
+
+function _pePicker_RemoveParam(paramName) {
+    (window._pePickerSelected || new Set()).delete(paramName);
+    if (window._pePickerZoom) _pePicker_DrawTypeZoom(window._pePickerZoom);
+    _pePicker_UpdatePanel();
+}
+
+function _pePicker_BackToTypes() { _pePicker_DrawTypeOverview(); }
+
+function _pePicker_ClearAll() {
+    window._pePickerSelected = new Set();
+    if (window._pePickerZoom) _pePicker_DrawTypeZoom(window._pePickerZoom);
+    _pePicker_UpdatePanel();
+}
+
+// Refresh type groups and redraw current view after a new file's data arrives.
+// Preserves selection and zoom state.
+function _pePicker_RefreshData(paramFileMap, selectedFiles) {
+    // Rebuild type groups
+    const typeGroups = new Map();
+    for (const [name, egIds] of paramFileMap.entries()) {
+        const tl = _peParamTypeLabel(name) || 'Other';
+        if (!typeGroups.has(tl)) typeGroups.set(tl, []);
+        typeGroups.get(tl).push({ name, fileCount: egIds.size });
+    }
+    for (const [, params] of typeGroups) {
+        params.sort((a, b) => b.fileCount - a.fileCount || a.name.localeCompare(b.name));
+    }
+    window._pePickerTypeGroups   = typeGroups;
+    window._pePickerParamFileMap = paramFileMap;
+    window._peLastChecklistState = { paramFileMap, selectedFiles };
+    window._pePickerNFiles       = selectedFiles.length;
+
+    // Redraw whichever view is active
+    if (window._pePickerZoom) {
+        _pePicker_DrawTypeZoom(window._pePickerZoom);
+    } else {
+        _pePicker_DrawTypeOverview();
+    }
+    // Update breadcrumb "All Types" count
+    const crumbEl = document.querySelector('#pePickerBreadcrumb .pe-crumb');
+    if (crumbEl) crumbEl.innerHTML = `All Types<span style="opacity:0.6;font-weight:400;margin-left:4px;">(${typeGroups.size})</span>`;
 }
 
 function _peEsc(s) {
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function _peFormatValue(v) {
+    // Display numbers rounded to 2 decimal places; leave non-numeric strings as-is
+    const s = String(v);
+    if (s.trim() === '' || s === 'Skipped, Data Too Large') return s;
+    const n = Number(s.trim());
+    if (!isNaN(n) && isFinite(n)) return String(+n.toFixed(2));
+    return s;
 }
 
 function _peToggleAll(checked) {
@@ -3170,19 +3456,34 @@ function _peCountSelected() {
     }
 }
 
-// filter search on checklist
+// filter search on checklist / picker / treemap
 function filterParamExplorerTreemap(query) {
     const term = query.trim().toLowerCase();
-    // checklist mode
-    const rows = document.querySelectorAll('.pe-param-row');
-    if (rows.length > 0) {
-        rows.forEach(row => {
-            const name = (row.querySelector('.pe-param-name')?.textContent || '').toLowerCase();
-            row.style.display = (!term || name.includes(term)) ? '' : 'none';
-        });
+
+    // Picker mode (phase 1 — type-overview or type-zoom treemap)
+    if (window._pePickerTypeGroups) {
+        const area = document.getElementById('pePickerTreemapArea');
+        if (area) {
+            if (window._pePickerZoom) {
+                // In type-zoom: dim param tiles that don't match
+                area.querySelectorAll('g[data-pname]').forEach(g => {
+                    const name = (g.getAttribute('data-pname') || '').toLowerCase();
+                    g.style.opacity = (!term || name.includes(term)) ? '' : '0.1';
+                });
+            } else {
+                // In type-overview: dim type tiles that don't match
+                area.querySelectorAll('g').forEach(g => {
+                    const textEl = g.querySelector('text');
+                    if (!textEl) return;
+                    const name = (textEl.textContent || '').toLowerCase();
+                    g.style.opacity = (!term || name.includes(term)) ? '' : '0.1';
+                });
+            }
+        }
         return;
     }
-    // treemap mode
+
+    // Treemap mode (phase 2 — after Load Values)
     const svg = document.querySelector('#paramExplorerTreemap svg');
     if (!svg) return;
     if (paramExplorerZoomState) {
@@ -3440,8 +3741,13 @@ async function _peRunCompliance_UNUSED() {
 }
 
 async function _peLoadCheckedValues() {
-    const checked = [...document.querySelectorAll('.pe-param-cb:checked')].map(cb => cb.value);
+    // Phase-1 picker (treemap) populates _pePickerSelected; fall back to legacy checkboxes
+    const checked = (window._pePickerSelected && window._pePickerSelected.size > 0)
+        ? Array.from(window._pePickerSelected)
+        : [...document.querySelectorAll('.pe-param-cb:checked')].map(cb => cb.value);
     if (checked.length === 0) { alert('Please select at least one parameter.'); return; }
+    // Clear picker state so phase-2 treemap gets a clean container
+    window._pePickerTypeGroups = null;
 
     const modal     = document.getElementById('paramExplorerModal');
     const loading   = document.getElementById('paramExplorerLoading');
@@ -3451,7 +3757,7 @@ async function _peLoadCheckedValues() {
     const searchInput = document.getElementById('paramExplorerSearch');
     const backBtn   = document.getElementById('paramExplorerBackBtn');
 
-    loading.style.display = 'flex';
+    loading.style.display = 'none';   // keep overlay hidden — live treemap renders show progress
     // Don't clear treemap yet — let live renders fill it progressively;
     // it will be replaced on the first _peScheduleRender call.
     paramExplorerZoomState = null;
@@ -3467,13 +3773,12 @@ async function _peLoadCheckedValues() {
     window._paramExplorerAgg = agg;
     treemapDiv.innerHTML = '';   // clear checklist now that we're switching to treemap mode
 
-    const distinctQuery = `
+    const distinctByNameQuery = `
         query GetDistinctByName($elementGroupId: ID!, $name: String!) {
             distinctPropertyValuesInElementGroupByName(elementGroupId: $elementGroupId, name: $name) {
                 results { values(limit: 1000) { value count } }
             }
         }`;
-
     // Build (file, paramName) work items
     // Use the API-normalised name for the actual query (handles Fire_Resistance_Rating → Fire Resistance Rating)
     const workItems = [];
@@ -3494,21 +3799,75 @@ async function _peLoadCheckedValues() {
         if (modal.style.display === 'none') return;
         await Promise.all(workItems.slice(i, i + CONCURRENCY).map(async ({ f, paramName, apiName }) => {
             try {
-                const r = await executeGraphQLQuery(distinctQuery, { elementGroupId: f.egId, name: apiName }, region);
-                const vals = r.data?.distinctPropertyValuesInElementGroupByName?.results?.[0]?.values || [];
                 if (!agg.has(paramName)) agg.set(paramName, new Map());
                 const byValue = agg.get(paramName);
-                for (const { value } of vals) {
-                    if (value == null || String(value).trim() === '') continue;
-                    const v = String(value).length > 120 ? String(value).slice(0, 120) + '…' : String(value);
-                    if (!byValue.has(v)) byValue.set(v, { count: 0, categories: new Set(), files: new Set() });
-                    byValue.get(v).files.add(f.egName);
-                }
+                const r = await executeGraphQLQuery(distinctByNameQuery, { elementGroupId: f.egId, name: apiName }, region);
+                    const nameVals = r.data?.distinctPropertyValuesInElementGroupByName?.results?.[0]?.values || [];
+                    if (nameVals.length > 0) {
+                        for (const { value } of nameVals) {
+                            if (value == null || String(value).trim() === '') continue;
+                            const v = String(value).length > 120 ? String(value).slice(0, 120) + '\u2026' : String(value);
+                            if (!byValue.has(v)) byValue.set(v, { count: 0, categories: new Set(), files: new Set() });
+                            byValue.get(v).files.add(f.egName);
+                            // count set by Phase B
+                        }
+                    } else {
+                        // distinctByName returned empty — informal property not indexed.
+                        // Fall back to full element scan: read property value from each element.
+                        // This is reliable but slower; count is derived directly so Phase B will skip.
+                        const isV1scan = example1State.version === 'v1';
+                        const scanQ = isV1scan
+                            ? `query ScanElsV1($elementGroupId: ID!, $pagination: PaginationInput) {
+                                   elementsByElementGroupAtVersion(elementGroupId: $elementGroupId, versionNumber: 1, pagination: $pagination) {
+                                       pagination { cursor }
+                                       results { properties(pagination: { limit: 500 }) { results { name value } } }
+                                   } }`
+                            : `query ScanEls($elementGroupId: ID!, $pagination: PaginationInput) {
+                                   elementsByElementGroup(elementGroupId: $elementGroupId, pagination: $pagination) {
+                                       pagination { cursor }
+                                       results { properties(pagination: { limit: 500 }) { results { name value } } }
+                                   } }`;
+                        const scanKey = isV1scan ? 'elementsByElementGroupAtVersion' : 'elementsByElementGroup';
+                        const altName = apiName.replace(/_/g, ' ');
+                        const valueCounts = new Map();
+                        let scanCursor = null;
+                        let scanPage = 0;
+                        while (true) {
+                            if (modal.style.display === 'none') break;
+                            scanPage++;
+                            subtitle.textContent = `Scanning elements for "${paramName}" (${scanPage * 200} elements)…`;
+                            const rs = await executeGraphQLQuery(scanQ, {
+                                elementGroupId: f.egId,
+                                pagination: scanCursor ? { cursor: scanCursor, limit: 200 } : { limit: 200 }
+                            }, region);
+                            const pageData = rs.data?.[scanKey];
+                            for (const el of (pageData?.results || [])) {
+                                for (const p of (el.properties?.results || [])) {
+                                    if (p.name !== apiName && p.name !== altName) continue;
+                                    if (p.value == null || String(p.value).trim() === '') continue;
+                                    const v = String(p.value).length > 120 ? String(p.value).slice(0, 120) + '\u2026' : String(p.value);
+                                    valueCounts.set(v, (valueCounts.get(v) || 0) + 1);
+                                }
+                            }
+                            scanCursor = pageData?.pagination?.cursor || null;
+                            if (!scanCursor) break;
+                        }
+                        for (const [v, cnt] of valueCounts) {
+                            if (!byValue.has(v)) byValue.set(v, { count: 0, categories: new Set(), files: new Set() });
+                            const ent = byValue.get(v);
+                            ent.files.add(f.egName);
+                            ent.count += cnt;  // counted directly — Phase B will skip (count > 0)
+                        }
+                        if (valueCounts.size === 0) {
+                            logDebug(`peLoadValues: ${f.egName}/${paramName}: informal prop — scan found no values`);
+                        }
+                    }
             } catch (err) {
                 logDebug(`peLoadValues: ${f.egName}/${paramName}: ${err.message}`);
             }
             done++;
-            progress.textContent = `Discovering values: ${done} / ${workItems.length}…`;
+            subtitle.textContent = `Discovering values: ${done} / ${workItems.length}…`;
+            _peScheduleRender();
         }));
     }
 
@@ -3539,7 +3898,9 @@ async function _peLoadCheckedValues() {
                 const fc = selectedFiles.find(sf => sf.egName === fileName);
                 if (fc) {
                     const an = (window._paramApiNameCache[fc.egId]?.get(paramName)) || paramName;
-                    countItems.push({ fc, an, valueName, entry });
+                    // Skip Phase B if count is already known (informal params counted via element scan).
+                    if (entry.count > 0) continue;
+                    countItems.push({ fc, paramName, an, valueName, entry });
                 }
             }
         }
@@ -3548,17 +3909,18 @@ async function _peLoadCheckedValues() {
     let doneB = 0;
     for (let i = 0; i < countItems.length; i += CONCURRENCY) {
         if (modal.style.display === 'none') return;
-        await Promise.all(countItems.slice(i, i + CONCURRENCY).map(async ({ fc, an, valueName, entry }) => {
+        await Promise.all(countItems.slice(i, i + CONCURRENCY).map(async ({ fc, paramName, an, valueName, entry }) => {
             try {
+                const ev = String(valueName).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
                 const pp = /\s/.test(an)
                     ? ("'property.name." + an.replace(/'/g, "\\'") + "'")
                     : ("property.name." + an.replace(/'/g, "\\'"));
-                const ev = String(valueName).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+                const filterArg = { query: pp + "=='" + ev + "'" };
                 let cnt = 0, cur = null;
                 do {
                     const r = await executeGraphQLQuery(isV1 ? _cqV1 : _cqV2, {
                         elementGroupId: fc.egId,
-                        filter: { query: pp + "=='" + ev + "'" },
+                        filter: filterArg,
                         pagination: cur ? { cursor: cur, limit: 500 } : { limit: 500 }
                     }, region);
                     const d2 = r.data?.[_cKey];
@@ -3570,7 +3932,7 @@ async function _peLoadCheckedValues() {
                 logDebug(`peCountEls: ${fc.egName}/${valueName}: ${err.message}`);
             }
             doneB++;
-            progress.textContent = `Counting elements: ${doneB} / ${countItems.length}…`;
+            subtitle.textContent = `Counting elements: ${doneB} / ${countItems.length}…`;
             _peScheduleRender();
         }));
     }
@@ -3596,6 +3958,7 @@ function paramExplorerZoomIn(paramName) {
     const agg = window._paramExplorerAgg;
     if (!agg || !agg.has(paramName)) return;
     paramExplorerZoomState = paramName;
+    window._peZoomSelected = new Set();  // clear tile selection on each zoom-in
 
     const backBtn  = document.getElementById('paramExplorerBackBtn');
     const subtitle = document.getElementById('paramExplorerSubtitle');
@@ -3963,7 +4326,53 @@ function _peBuildLegend(allFilesForLegend, fileColor) {
     return legendEl;
 }
 
+// ── param type helpers ────────────────────────────────────────────────────────
+// Look up the friendly type label for a parameter name across all cached egIds.
+function _peParamTypeLabel(paramName) {
+    const typeCache = window._paramTypeCache || {};
+    for (const egId in typeCache) {
+        const t = (typeCache[egId] || new Map()).get(paramName);
+        if (t) return _peTypeStrToLabel(t);
+    }
+    return null;
+}
+
+// Convert an Autodesk specification string to a short friendly label.
+// Real format: "autodesk.parameter.aec:length-1.0.0"
+// Extracts the type name between ":" and the version "-x.x.x".
+function _peTypeStrToLabel(typeStr) {
+    if (!typeStr) return null;
+    const s = typeStr.toLowerCase();
+    // Extract type name from URN: the segment after last ":" and before "-digit"
+    const urnMatch = s.match(/:([a-z]+)/);
+    const typeName = urnMatch ? urnMatch[1] : s;
+    const map = {
+        'length': 'Length',   'area': 'Area',       'volume': 'Volume',
+        'angle': 'Angle',     'boolean': 'Bool',    'yesno': 'Yes/No',
+        'integer': 'Int',     'int': 'Int',         'number': 'Number',
+        'double': 'Number',   'real': 'Number',     'text': 'Text',
+        'multilinetext': 'Text', 'string': 'Text',  'url': 'URL',
+        'material': 'Material', 'force': 'Force',   'mass': 'Mass',
+        'currency': 'Currency', 'energy': 'Energy', 'speed': 'Speed',
+        'time': 'Time',       'temperature': 'Temp'
+    };
+    return map[typeName] || (urnMatch ? typeName.charAt(0).toUpperCase() + typeName.slice(1) : null);
+}
+
+// Pick a badge colour per type label (ACC-style muted tones).
+function _peTypeBadgeColor(label) {
+    const m = {
+        'Text': '#0696d7', 'Bool': '#7b1fa2', 'Int': '#ef6c00',
+        'Number': '#00897b', 'Length': '#1565c0', 'Area': '#2e7d32',
+        'Volume': '#5d4037', 'Angle': '#558b2f', 'Material': '#c62828',
+        'Force': '#6a1b9a', 'Mass': '#37474f', 'URL': '#0d47a1'
+    };
+    return m[label] || '#757575';
+}
+
 // ── overview treemap (root → param → value) ───────────────────────────────────
+// Each parameter gets an EQUAL share of the canvas height so that parameters
+// with few values are just as readable as those with many elements.
 function _peRenderOverview(agg, container, isLive) {
     const params = [];
     agg.forEach((byValue, paramName) => {
@@ -3982,11 +4391,9 @@ function _peRenderOverview(agg, container, isLive) {
         .domain(params.map(p => p.paramName))
         .range(_PE_PALETTE);
 
-    // Per-value coloring (fallback for single-file scenarios)
     const allValueNames = params.flatMap(p => Array.from(p.byValue.keys()));
     const valueColor = d3.scaleOrdinal().domain(allValueNames).range(_PE_PALETTE);
 
-    // Per-file coloring — stable scale from full unfiltered agg so colors don't shift when toggling
     const allFiles = [...new Set(params.flatMap(p => [...p.byValue.values()].flatMap(e => [...e.files])))].sort();
     const allFilesForLegend = (() => {
         const src = window._paramExplorerAgg;
@@ -3996,104 +4403,83 @@ function _peRenderOverview(agg, container, isLive) {
     const totalSelectedFiles = (example1State.fileSummary || []).filter(f => selectedEgIds.has(f.egId)).length;
     const fileColor = d3.scaleOrdinal().domain(allFilesForLegend).range(_PE_PALETTE);
 
-    const data = {
-        name: 'Parameters',
-        children: params.map(({ paramName, byValue }) => ({
-            name: paramName,
-            children: Array.from(byValue.entries())
-                .map(([value, entry]) => ({
-                    name: value, value: entry.count, paramName,
-                    categories: [...entry.categories].sort(),
-                    files: [...entry.files].sort()
-                }))
-                .sort((a, b) => b.value - a.value)
-        }))
-    };
+    const width   = Math.max(600, (container.clientWidth  || 1100) - 4);
+    const height  = Math.max(200, (container.clientHeight || 600) - 4);
+    const N       = params.length;
+    const ROW_GAP = 6;
+    const HEADER_H = 36;
 
-    const width  = Math.max(600, (container.clientWidth  || 1100) - 4);
-    const height = Math.max(200, (container.clientHeight || 600) - 4);
+    // Each parameter row gets equal height
+    const rowH    = Math.max(80, Math.floor((height - ROW_GAP * (N - 1)) / N));
+    const contentH = Math.max(40, rowH - HEADER_H);
+    const totalSvgH = N * rowH + (N - 1) * ROW_GAP;
 
-    const root = d3.hierarchy(data).sum(d => d.value || 0).sort((a, b) => b.value - a.value);
-    d3.treemap()
-        .size([width, height])
-        .paddingTop(d  => d.depth === 0 ? 0 : d.depth === 1 ? 32 : 0)
-        .paddingRight( d => d.depth >= 1 ? 3 : 0)
-        .paddingBottom(d => d.depth >= 1 ? 3 : 0)
-        .paddingLeft(  d => d.depth >= 1 ? 3 : 0)
-        .round(true)(root);
+    const svg = d3.create('svg').attr('width', width).attr('height', totalSvgH)
+        .style('user-select', 'none');
 
-    const svg  = d3.create('svg').attr('width', width).attr('height', height);
-    const node = svg.selectAll('g')
-        .data(root.descendants())
-        .join('g')
-        .attr('transform', d => `translate(${d.x0},${d.y0})`);
+    params.forEach(({ paramName, byValue, total }, rowIndex) => {
+        const y0   = rowIndex * (rowH + ROW_GAP);
+        const rowG = svg.append('g').attr('transform', `translate(0,${y0})`);
 
-    node.filter(d => d.depth === 1).attr('data-paramname', d => d.data.name);
+        // Row background
+        rowG.append('rect')
+            .attr('width', width).attr('height', rowH)
+            .attr('fill', color(paramName)).attr('opacity', 0.10)
+            .attr('rx', 4)
+            .attr('stroke', color(paramName)).attr('stroke-width', 1.5).attr('stroke-opacity', 0.30);
 
-    node.append('rect')
-        .attr('width',  d => Math.max(0, d.x1 - d.x0))
-        .attr('height', d => Math.max(0, d.y1 - d.y0))
-        .attr('fill', d => {
-            if (d.depth === 0) return 'transparent';
-            if (d.depth === 1) return color(d.data.name);
-            const pav = (window._peParamAllowedValues || {})[d.data.paramName] || [];
-            if (pav.length > 0) return pav.includes(d.data.name) ? '#388e3c' : '#e53935';
-            if (allFilesForLegend.length > 1) {
-                const fs = d.data.files || [];
-                return fs.length === 1 ? fileColor(fs[0]) : '#9e9e9e';
-            }
-            return valueColor(d.data.name);
-        })
-        .attr('opacity', d => d.depth === 1 ? 0.15 : 0.88)
-        .attr('stroke', 'white')
-        .attr('stroke-width', d => d.depth === 1 ? 2 : 1)
-        .attr('rx', d => d.depth <= 1 ? 4 : 2);
-
-    // Depth-1 parameter header — label + "Check Compliance" button
-    node.filter(d => d.depth === 1).each(function(d) {
-        const w = d.x1 - d.x0, h = d.y1 - d.y0;
-        if (w < 22 || h < 16) return;
-        const g = d3.select(this);
-        const paramFileSet = new Set((d.children || []).flatMap(c => c.data.files || []));
-        const fileSuffix = totalSelectedFiles > 1 ? `  ·  ${paramFileSet.size}/${totalSelectedFiles} files` : '';
-
-        // Per-param compliance state
-        const pav = (window._peParamAllowedValues || {})[d.data.name] || [];
+        // ── Header ──────────────────────────────────────────────────────────
+        const pav = (window._peParamAllowedValues || {})[paramName] || [];
         let compSuffix = '';
-        if (pav.length > 0 && d.children) {
+        if (pav.length > 0) {
             let ok = 0, notOk = 0;
-            d.children.forEach(c => { pav.includes(c.data.name) ? ok += c.data.value : notOk += c.data.value; });
+            byValue.forEach((entry, val) => { pav.includes(val) ? ok += entry.count : notOk += entry.count; });
             compSuffix = `  ✓${ok.toLocaleString()} ✗${notOk.toLocaleString()}`;
         }
+        const paramFileSet = new Set([...byValue.values()].flatMap(e => [...e.files]));
+        const fileSuffix   = totalSelectedFiles > 1 ? `  ·  ${paramFileSet.size}/${totalSelectedFiles} files` : '';
 
-        // "Check Compliance" button dimensions
         const btnLabel = pav.length > 0 ? '✓ Active' : 'Check Compliance';
         const btnW = pav.length > 0 ? 74 : 124;
-        const btnH = 28;
-        const showBtn = w >= btnW + 24 && h >= 34;
+        const btnH = 26;
+        const showBtn = width >= btnW + 100;
 
-        const reservedRight = showBtn ? btnW + 8 : 6;
-        const maxChars = Math.max(4, Math.floor((w - reservedRight - 6) / 7.2));
-        const label = d.data.name.length > maxChars ? d.data.name.slice(0, maxChars - 1) + '…' : d.data.name;
+        const reservedRight = showBtn ? btnW + 12 : 8;
+        const maxChars = Math.max(6, Math.floor((width - reservedRight - 8) / 7.5));
+        const label = paramName.length > maxChars ? paramName.slice(0, maxChars - 1) + '…' : paramName;
 
-        g.append('text')
-            .attr('x', 5).attr('y', 20)
-            .text(label + (w > 140 ? fileSuffix + compSuffix : ''))
-            .attr('font-size', '11px')
-            .attr('fill', pav.length > 0 ? '#1565c0' : '#111')
+        const typeLabel = _peParamTypeLabel(paramName);
+        const hdrText = rowG.append('text')
+            .attr('x', 8).attr('y', 23)
+            .attr('font-size', '12px')
             .attr('font-weight', '700')
             .style('pointer-events', 'none');
+        hdrText.append('tspan')
+            .text(label)
+            .attr('fill', pav.length > 0 ? '#1565c0' : '#111');
+        if (typeLabel && width > 220) {
+            hdrText.append('tspan')
+                .text('  ' + typeLabel)
+                .attr('font-size', '10px')
+                .attr('font-weight', '600')
+                .attr('fill', _peTypeBadgeColor(typeLabel))
+                .attr('dx', 3);
+        }
+        if (width > 200 && (fileSuffix || compSuffix)) {
+            hdrText.append('tspan')
+                .text(fileSuffix + compSuffix)
+                .attr('font-size', '11px')
+                .attr('font-weight', '400')
+                .attr('fill', '#586370');
+        }
 
         if (showBtn) {
-            const bx = w - btnW - 4;
-            const by = 2;
-            const btnG = g.append('g')
+            const bx = width - btnW - 6;
+            const by = 5;
+            const btnG = rowG.append('g')
                 .style('cursor', 'pointer')
                 .style('pointer-events', 'all')
-                .on('click', function(event) {
-                    event.stopPropagation();
-                    _peShowCompliancePopover(event, d.data.name);
-                });
+                .on('click', (event) => { event.stopPropagation(); _peShowCompliancePopover(event, paramName); });
             btnG.append('rect')
                 .attr('x', bx).attr('y', by)
                 .attr('width', btnW).attr('height', btnH)
@@ -4104,58 +4490,104 @@ function _peRenderOverview(agg, container, isLive) {
                 .attr('x', bx + btnW / 2).attr('y', by + btnH / 2 + 4)
                 .attr('text-anchor', 'middle')
                 .text(btnLabel)
-                .attr('font-size', '11px')
-                .attr('fill', 'white')
-                .attr('font-weight', '600')
+                .attr('font-size', '11px').attr('fill', 'white').attr('font-weight', '600')
                 .style('pointer-events', 'none');
         }
-    });
-    node.filter(d => d.depth === 1)
-        .style('cursor', 'zoom-in')
-        .on('click', (event, d) => { event.stopPropagation(); paramExplorerZoomIn(d.data.name); })
-        .on('mousemove', (event, d) => {
-            _peShowTooltip(event,
-                `<div style="font-weight:700;margin-bottom:3px;">${d.data.name}</div>` +
-                `<div style="opacity:.8">Click to zoom in and explore values</div>` +
-                `<div><span style="opacity:.7">Distinct values:</span> ${d.data.byValue ? d.data.byValue.size : d.children?.length}</div>`
-            );
-        })
-        .on('mouseout', _peHideTooltip);
 
-    // Depth-2 leaves (values)
-    node.filter(d => d.depth === 2).each(function(d) {
-        const w = d.x1 - d.x0, h = d.y1 - d.y0;
-        if (w < 16 || h < 12) return;
-        const g = d3.select(this);
-        const maxChars = Math.max(3, Math.floor(w / 6.5));
-        const label = (d.data.name || '').length > maxChars
-            ? (d.data.name || '').slice(0, maxChars - 1) + '…'
-            : (d.data.name || '');
-        g.append('text').attr('x', 4).attr('y', 13)
-            .text(label)
-            .attr('font-size', '10px').attr('fill', '#111').attr('font-weight', '600')
-            .style('pointer-events', 'none');
-        if (h >= 26 && d.data.value > 0) {
-            g.append('text').attr('x', 4).attr('y', 24)
-                .text(`${d.data.value.toLocaleString()}×`)
-                .attr('font-size', '9px').attr('fill', '#333')
-                .style('pointer-events', 'none');
-        }
+        // Transparent overlay on header area for zoom-in click
+        rowG.append('rect')
+            .attr('width', width - (showBtn ? btnW + 14 : 0)).attr('height', HEADER_H)
+            .attr('fill', 'transparent')
+            .style('cursor', 'zoom-in')
+            .on('click', (event) => { event.stopPropagation(); paramExplorerZoomIn(paramName); })
+            .on('mousemove', (event) => {
+                _peShowTooltip(event,
+                    `<div style="font-weight:700;margin-bottom:3px;">${paramName}</div>` +
+                    `<div style="opacity:.8">Click to zoom in and explore values</div>` +
+                    `<div><span style="opacity:.7">Distinct values:</span> ${byValue.size}</div>`
+                );
+            })
+            .on('mouseout', _peHideTooltip);
+
+        // ── Per-parameter mini-treemap ───────────────────────────────────────
+        const entries = Array.from(byValue.entries())
+            .map(([value, entry]) => ({
+                name: value, value: entry.count || 0, paramName,
+                categories: [...entry.categories].sort(),
+                files: [...entry.files].sort()
+            }))
+            .sort((a, b) => b.value - a.value);
+
+        // When all counts are 0 (still loading), show equal-area placeholder tiles
+        const allZero = entries.every(e => e.value === 0);
+        if (allZero) entries.forEach(e => { e._sizeVal = 1; });
+        else         entries.forEach(e => { e._sizeVal = e.value; });
+
+        const vData = { name: paramName, children: entries };
+        const vRoot = d3.hierarchy(vData).sum(d => d._sizeVal || 0).sort((a, b) => b.value - a.value);
+        d3.treemap()
+            .size([width, contentH])
+            .paddingInner(2)
+            .paddingOuter(3)
+            .round(true)(vRoot);
+
+        const tilesG = rowG.append('g').attr('transform', `translate(0,${HEADER_H})`);
+        vRoot.leaves().forEach(leaf => {
+            const lw = leaf.x1 - leaf.x0, lh = leaf.y1 - leaf.y0;
+            if (lw < 2 || lh < 2) return;
+            const tg = tilesG.append('g').attr('transform', `translate(${leaf.x0},${leaf.y0})`);
+            const isSkipped = leaf.data.name === 'Skipped, Data Too Large';
+            const tileColor = (() => {
+                if (isSkipped) return '#bdbdbd';
+                if (pav.length > 0) return pav.includes(leaf.data.name) ? '#388e3c' : '#e53935';
+                if (allFilesForLegend.length > 1) {
+                    const fs = leaf.data.files || [];
+                    return fs.length === 1 ? fileColor(fs[0]) : '#9e9e9e';
+                }
+                return valueColor(leaf.data.name);
+            })();
+            tg.append('rect')
+                .attr('width', lw).attr('height', lh)
+                .attr('fill', tileColor).attr('opacity', 0.88)
+                .attr('stroke', 'white').attr('stroke-width', 1).attr('rx', 2);
+            if (lw >= 16 && lh >= 12) {
+                const maxChars = Math.max(3, Math.floor(lw / 6.5));
+                const rawName = leaf.data.name || '';
+                const displayName = isSkipped ? rawName : _peFormatValue(rawName);
+                const txt = displayName.length > maxChars
+                    ? displayName.slice(0, maxChars - 1) + '…'
+                    : displayName;
+                tg.append('text').attr('x', 4).attr('y', 13)
+                    .text(isSkipped ? (lw > 80 ? '⚠ ' + txt : txt) : txt)
+                    .attr('font-size', '10px')
+                    .attr('fill', isSkipped ? '#616161' : '#111')
+                    .attr('font-weight', '600')
+                    .attr('font-style', isSkipped ? 'italic' : 'normal')
+                    .style('pointer-events', 'none');
+                if (lh >= 26 && !allZero && leaf.data.value > 0) {
+                    tg.append('text').attr('x', 4).attr('y', 24)
+                        .text(`${leaf.data.value.toLocaleString()}×`)
+                        .attr('font-size', '9px').attr('fill', isSkipped ? '#757575' : '#333')
+                        .style('pointer-events', 'none');
+                }
+            }
+            tg.style('cursor', 'zoom-in')
+                .on('click', (event) => { event.stopPropagation(); paramExplorerZoomIn(leaf.data.paramName); })
+                .on('mousemove', (event) => {
+                    _peShowTooltip(event,
+                        `<div style="font-weight:700;font-size:13px;margin-bottom:4px;">${leaf.data.paramName}</div>` +
+                        `<div><span style="opacity:.7">Value:</span> <strong>${_peFormatValue(leaf.data.name)}</strong></div>` +
+                        (isSkipped
+                            ? `<div style="color:#f57c00;font-size:11px;margin-top:4px;">⚠ The Autodesk API returned this placeholder because the property value exceeded its size limit. The actual value cannot be retrieved.</div>`
+                            : `<div><span style="opacity:.7">Elements:</span> <strong>${allZero ? '—' : leaf.data.value.toLocaleString()}</strong></div>`) +
+                        `<div><span style="opacity:.7">Categories:</span> ${(leaf.data.categories || []).join(', ') || '—'}</div>` +
+                        `<div><span style="opacity:.7">Files:</span> ${(leaf.data.files || []).join(', ') || '—'}</div>` +
+                        `<div style="opacity:.6;font-size:10px;margin-top:4px;">Click to explore all values ›</div>`
+                    );
+                })
+                .on('mouseout', _peHideTooltip);
+        });
     });
-    node.filter(d => d.depth === 2)
-        .style('cursor', 'zoom-in')
-        .on('click', (event, d) => { event.stopPropagation(); paramExplorerZoomIn(d.data.paramName); })
-        .on('mousemove', (event, d) => {
-            _peShowTooltip(event,
-                `<div style="font-weight:700;font-size:13px;margin-bottom:4px;">${d.data.paramName}</div>` +
-                `<div><span style="opacity:.7">Value:</span> <strong>${d.data.name}</strong></div>` +
-                `<div><span style="opacity:.7">Elements:</span> <strong>${d.data.value.toLocaleString()}</strong></div>` +
-                `<div><span style="opacity:.7">Categories:</span> ${(d.data.categories || []).join(', ') || '—'}</div>` +
-                `<div><span style="opacity:.7">Files:</span> ${(d.data.files || []).join(', ') || '—'}</div>` +
-                `<div style="opacity:.6;font-size:10px;margin-top:4px;">Click to explore all values ›</div>`
-            );
-        })
-        .on('mouseout', _peHideTooltip);
 
     // Live-load indicator
     if (isLive) {
@@ -4173,6 +4605,186 @@ function _peRenderOverview(agg, container, isLive) {
     container.appendChild(svg.node());
 }
 
+// ── Zoom-view tile multi-select helpers ─────────────────────────────────────
+function _peUpdateZoomSelBar(paramName) {
+    const bar = document.getElementById('peZoomSelBar');
+    if (!bar) return;
+    const sel = window._peZoomSelected || new Set();
+    if (sel.size === 0) { bar.style.display = 'none'; return; }
+    const agg = window._paramExplorerAgg;
+    const byValue = agg?.get(paramName);
+    let totalEls = 0;
+    if (byValue) sel.forEach(v => { totalEls += (byValue.get(v)?.count || 0); });
+    bar.style.display = 'flex';
+    bar.innerHTML =
+        `<span><strong>${sel.size}</strong> value${sel.size > 1 ? 's' : ''} selected` +
+        ` &nbsp;·&nbsp; <strong>${totalEls.toLocaleString()}</strong> element${totalEls !== 1 ? 's' : ''}</span>` +
+        `<button id="peZoomSelClear" style="margin-left:auto;padding:4px 10px;font-size:12px;background:transparent;color:#c62828;border:1px solid #ef9a9a;border-radius:4px;cursor:pointer;">✕ Clear</button>` +
+        `<button id="peZoomSelView" style="padding:4px 14px;font-size:12px;background:#0696d7;color:white;border:none;border-radius:4px;cursor:pointer;font-weight:600;">Show in Viewer ►</button>`;
+    document.getElementById('peZoomSelClear').addEventListener('click', _peClearZoomSelection);
+    document.getElementById('peZoomSelView').addEventListener('click', _peOpenSelectedInViewer);
+}
+
+function _peClearZoomSelection() {
+    window._peZoomSelected = new Set();
+    const bar = document.getElementById('peZoomSelBar');
+    const paramName = bar?.dataset.paramname;
+    if (!paramName) return;
+    const agg = _peFilteredAgg() || window._paramExplorerAgg;
+    const byValue = agg?.get(paramName);
+    const cont = document.getElementById('paramExplorerTreemap');
+    if (byValue) _peRenderZoom(byValue, paramName, cont);
+}
+
+async function _peOpenSelectedInViewer() {
+    const bar = document.getElementById('peZoomSelBar');
+    const paramName = bar?.dataset.paramname;
+    if (!paramName) return;
+    const selected = [...(window._peZoomSelected || new Set())];
+    if (selected.length === 0) return;
+    const agg = window._paramExplorerAgg;
+    const byValue = agg?.get(paramName);
+    const allFileNames = new Set();
+    if (byValue) selected.forEach(v => (byValue.get(v)?.files || []).forEach(f => allFileNames.add(f)));
+    const candidates = (example1State.fileSummary || [])
+        .filter(f => allFileNames.has(f.egName) && f.fileVersionUrn);
+    if (candidates.length === 0) { alert('No viewable file found for selection.'); return; }
+    const fileEntry = await _pickProjectForFile(candidates);
+    if (!fileEntry) return;
+    const apiParamName = (window._paramApiNameCache[fileEntry.egId]?.get(paramName)) || paramName;
+    const loading  = document.getElementById('paramExplorerLoading');
+    const progress = document.getElementById('paramExplorerProgress');
+    loading.style.display = 'flex';
+    progress.textContent = `Fetching ${selected.length} value${selected.length > 1 ? 's' : ''} in ${fileEntry.egName}\u2026`;
+    const propPath = /\s/.test(apiParamName)
+        ? `'property.name.${apiParamName.replace(/'/g, "\\'")}'`
+        : `property.name.${apiParamName.replace(/'/g, "\\'")}`;    
+    const parts = selected.map(v =>
+        `${propPath}=='${String(v).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`
+    );
+    const filterQuery = parts.length === 1 ? parts[0] : `(${parts.join(',')})`;    
+    const isV1 = example1State.version === 'v1';
+    const dataKey = isV1 ? 'elementsByElementGroupAtVersion' : 'elementsByElementGroup';
+    const gql = isV1
+        ? `query GetElsByVals($elementGroupId: ID!, $filter: ElementFilterInput, $pagination: PaginationInput) {
+            elementsByElementGroupAtVersion(elementGroupId: $elementGroupId, versionNumber: 1, filter: $filter, pagination: $pagination) {
+                pagination { cursor }
+                results { properties(pagination: { limit: 50 }) { results { name value } } }
+            } }`
+        : `query GetElsByVals($elementGroupId: ID!, $filter: ElementFilterInput, $pagination: PaginationInput) {
+            elementsByElementGroup(elementGroupId: $elementGroupId, filter: $filter, pagination: $pagination) {
+                pagination { cursor }
+                results { properties(pagination: { limit: 50 }) { results { name value } } }
+            } }`;
+    const revitIds = [];
+    const perValueIds = new Map(selected.map(v => [String(v), []]));
+    try {
+        // Fetch all values in parallel — each value gets its own query so we know
+        // exactly which elements belong to which bucket without relying on the
+        // 50-property limit per element.
+        await Promise.all(selected.map(async v => {
+            const singleFilter = `${propPath}=='${String(v).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+            let cursor = null;
+            do {
+                const r = await executeGraphQLQuery(gql, {
+                    elementGroupId: fileEntry.egId,
+                    filter: { query: singleFilter },
+                    pagination: cursor ? { cursor, limit: 100 } : { limit: 100 }
+                }, example1State.region);
+                const data = r.data?.[dataKey];
+                for (const el of (data?.results || [])) {
+                    const props = el.properties?.results || [];
+                    const revitId = props.find(p => p.name === 'Revit Element ID')?.value;
+                    if (revitId == null || String(revitId).trim() === '') continue;
+                    revitIds.push(String(revitId));
+                    perValueIds.get(String(v)).push(String(revitId));
+                }
+                cursor = data?.pagination?.cursor || null;
+            } while (cursor);
+        }));
+    } catch (err) {
+        loading.style.display = 'none';
+        alert(`Failed to fetch elements: ${err.message}`);
+        return;
+    }
+    loading.style.display = 'none';
+    if (revitIds.length === 0) {
+        alert(`No elements found for selected values in ${fileEntry.egName}.`);
+        return;
+    }
+    pendingRevitElementIds = revitIds;
+    pendingRevitCategory   = null;
+    currentRegion          = example1State.region;
+    window._pendingParamEditRows = selected.map(v => ({
+        paramName,
+        currentValue: v,
+        newValue: '',
+        revitIds: perValueIds.get(String(v)) || []
+    }));
+    // Store file context needed for Design Automation submission
+    window._pendingDAFileContext = {
+        fileVersionUrn: fileEntry.fileVersionUrn,
+        projectId:      fileEntry.projectId || null,
+        hubId:          example1State.hubId || null,
+        region:         example1State.region || null,
+        fileName:       fileEntry.egName || 'model.rvt'
+    };
+    openViewerModal([{ id: fileEntry.egId, name: fileEntry.egName,
+        alternativeIdentifiers: { fileVersionUrn: fileEntry.fileVersionUrn } }]);
+}
+
+// ── Project picker ─────────────────────────────────────────────────────────────
+// Returns a Promise resolving to a fileSummary entry, or null if cancelled.
+// When all candidates come from a single project, resolves immediately (no UI).
+function _pickProjectForFile(candidates) {
+    const byProject = new Map();
+    for (const c of candidates) {
+        const key = c.projectId || '__unknown__';
+        if (!byProject.has(key)) byProject.set(key, c);
+    }
+    if (byProject.size <= 1) return Promise.resolve(candidates[0]);
+
+    return new Promise((resolve) => {
+        const entries = [...byProject.values()];
+        const overlay = document.createElement('div');
+        overlay.className = 'modal active';
+        overlay.style.zIndex = '100000';
+
+        const btnHtml = entries.map((e, i) =>
+            `<button class="btn btn-primary" style="width:100%;margin-bottom:8px;text-align:left;" data-idx="${i}">
+                \uD83D\uDCC1 ${e.projectName || e.projectId || 'Unknown project'}
+                <span style="font-size:11px;opacity:0.75;display:block;font-weight:normal;">${e.egName}</span>
+            </button>`
+        ).join('');
+
+        overlay.innerHTML = `
+            <div class="modal-content" style="max-width:440px;">
+                <div class="modal-header">Select Project</div>
+                <p style="margin:0 0 14px;color:#555;">
+                    <strong>"${entries[0].egName}"</strong> exists in ${entries.length} projects.<br>
+                    Which project's file should be opened and updated?
+                </p>
+                ${btnHtml}
+                <div class="modal-footer" style="margin-top:8px;">
+                    <button class="btn btn-secondary" id="_pickCancelBtn">Cancel</button>
+                </div>
+            </div>`;
+
+        document.body.appendChild(overlay);
+
+        overlay.querySelectorAll('[data-idx]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.body.removeChild(overlay);
+                resolve(entries[parseInt(btn.dataset.idx, 10)]);
+            });
+        });
+        overlay.querySelector('#_pickCancelBtn').addEventListener('click', () => {
+            document.body.removeChild(overlay);
+            resolve(null);
+        });
+    });
+}
+
 // ── Open viewer for a specific param=value (from zoom-view tile click) ────────
 async function _peOpenValueInViewer(paramName, value, fileNames) {
     // Map file names back to fileSummary entries that have a viewable URN
@@ -4184,9 +4796,8 @@ async function _peOpenValueInViewer(paramName, value, fileNames) {
         return;
     }
 
-    // If multiple files contain this value, use the first one
-    // (future: could show a picker)
-    const fileEntry = candidates[0];
+    const fileEntry = await _pickProjectForFile(candidates);
+    if (!fileEntry) return;
     // Resolve to API name (e.g. 'Fire_Resistance_Rating' → 'Fire Resistance Rating')
     const apiParamName = (window._paramApiNameCache[fileEntry.egId]?.get(paramName)) || paramName;
     const loading = document.getElementById('paramExplorerLoading');
@@ -4296,13 +4907,15 @@ function _peRenderZoom(byValue, paramName, container) {
         .paddingOuter(6)
         .round(true)(root);
 
-    const svg  = d3.create('svg').attr('width', width).attr('height', height);
+    const svg  = d3.create('svg').attr('width', width).attr('height', height)
+        .style('user-select', 'none');
     const node = svg.selectAll('g')
         .data(root.leaves())
         .join('g')
         .attr('transform', d => `translate(${d.x0},${d.y0})`)
         .attr('data-peval', d => d.data.name)
-        .style('cursor', 'pointer');
+        .style('cursor', 'pointer')
+        .on('mousedown', (event) => { event.preventDefault(); });
 
     node.append('rect')
         .attr('width',  d => Math.max(0, d.x1 - d.x0))
@@ -4325,8 +4938,9 @@ function _peRenderZoom(byValue, paramName, container) {
         const w = d.x1 - d.x0, h = d.y1 - d.y0;
         if (w < 16 || h < 14) return;
         const g = d3.select(this);
+        const displayVal = _peFormatValue(d.data.name);
         const maxChars = Math.max(4, Math.floor(w / 7));
-        const label = d.data.name.length > maxChars ? d.data.name.slice(0, maxChars - 1) + '…' : d.data.name;
+        const label = displayVal.length > maxChars ? displayVal.slice(0, maxChars - 1) + '…' : displayVal;
 
         g.append('text').attr('x', 6).attr('y', 15)
             .text(label)
@@ -4350,25 +4964,49 @@ function _peRenderZoom(byValue, paramName, container) {
     });
 
     node.on('click', (event, d) => {
-        _peOpenValueInViewer(paramName, d.data.name, d.data.files);
+        if (!window._peZoomSelected) window._peZoomSelected = new Set();
+        if (window._peZoomSelected.has(d.data.name)) {
+            window._peZoomSelected.delete(d.data.name);
+            d3.select(event.currentTarget).select('rect')
+                .attr('stroke', 'white').attr('stroke-width', 1).attr('opacity', 0.88);
+        } else {
+            window._peZoomSelected.add(d.data.name);
+            d3.select(event.currentTarget).select('rect')
+                .attr('stroke', '#1565c0').attr('stroke-width', 3).attr('opacity', 1.0);
+        }
+        _peUpdateZoomSelBar(paramName);
     });
     node.on('mousemove', (event, d) => {
+        const isSelected = window._peZoomSelected?.has(d.data.name);
+        const hint = isSelected ? 'Click to deselect' : 'Click to select · then use Show in Viewer ►';
         _peShowTooltip(event,
             `<div style="font-weight:700;font-size:13px;margin-bottom:4px;">${paramName}</div>` +
-            `<div><span style="opacity:.7">Value:</span> <strong>${d.data.name}</strong></div>` +
+            `<div><span style="opacity:.7">Value:</span> <strong>${_peFormatValue(d.data.name)}</strong></div>` +
             `<div><span style="opacity:.7">Elements:</span> <strong>${d.data.value.toLocaleString()}</strong></div>` +
             `<div><span style="opacity:.7">Categories:</span> ${(d.data.categories || []).join(', ') || '—'}</div>` +
             `<div><span style="opacity:.7">Files:</span> ${(d.data.files || []).join(', ') || '—'}</div>` +
-            `<div style="opacity:.6;font-size:10px;margin-top:4px;">Click to open in Viewer ►</div>`
+            `<div style="opacity:.6;font-size:10px;margin-top:4px;">${hint}</div>`
         );
     }).on('mouseout', _peHideTooltip);
-
-
 
     container.innerHTML = '';
     if (allFilesForLegend.length > 1) {
         container.appendChild(_peBuildLegend(allFilesForLegend, fileColor));
     }
     container.appendChild(_peBuildParamComplianceBar(paramName));
+    const selBar = document.createElement('div');
+    selBar.id = 'peZoomSelBar';
+    selBar.dataset.paramname = paramName;
+    selBar.style.cssText = 'display:none;padding:7px 12px;background:#e3f2fd;border:1px solid #90caf9;border-radius:6px;margin:4px 4px 0;flex-direction:row;align-items:center;gap:10px;font-size:13px;flex-wrap:wrap;';
+    container.appendChild(selBar);
     container.appendChild(svg.node());
+    _peUpdateZoomSelBar(paramName);
+    // Restore visual selection state on re-render (e.g. legend toggle)
+    if (window._peZoomSelected?.size > 0) {
+        node.each(function(d) {
+            if (window._peZoomSelected.has(d.data.name)) {
+                d3.select(this).select('rect').attr('stroke', '#1565c0').attr('stroke-width', 3).attr('opacity', 1.0);
+            }
+        });
+    }
 }

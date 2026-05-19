@@ -253,6 +253,7 @@ body {
     margin: 2px 0;
 }
 
+.example1-sidebar .control-label {
     color: #0696d7;
     text-transform: uppercase;
     letter-spacing: 0.6px;
@@ -913,39 +914,185 @@ body {
     flex: 1;
     overflow: hidden;
     min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+/* ── Phase-1 Parameter Picker (treemap by type) ─────────────────────────── */
+#pePickerWrap {
+    flex: 1;
+    display: flex;
+    overflow: hidden;
+    min-height: 0;
+    background: white;
+    border-radius: 6px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+}
+#pePickerLeft {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-width: 0;
+}
+#pePickerBreadcrumb {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 7px 14px;
+    background: #f4f5f7;
+    border-bottom: 1px solid #d5dbe1;
+    font-size: 12px;
+    color: #586370;
+    flex-shrink: 0;
+    min-height: 34px;
+}
+.pe-crumb {
+    cursor: pointer;
+    color: #0696d7;
+    font-weight: 600;
+    white-space: nowrap;
+}
+.pe-crumb:hover { text-decoration: underline; }
+#pePickerTreemapArea {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    position: relative;
+}
+#pePickerRight {
+    width: 210px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    border-left: 1px solid #d5dbe1;
+    background: #fafbfc;
+}
+#pePickerRightHeader {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 9px 12px;
+    border-bottom: 1px solid #e8eaed;
+    flex-shrink: 0;
+    font-size: 13px;
+}
+#pePickerRightHeader button {
+    background: none;
+    border: none;
+    font-size: 11px;
+    color: #aaa;
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 3px;
+}
+#pePickerRightHeader button:hover { background: #fee; color: #c62828; }
+#pePickerSelectedList {
+    flex: 1;
+    overflow-y: auto;
+    padding: 4px 0;
+}
+#pePickerEmptyHint {
+    padding: 24px 14px;
+    text-align: center;
+    color: #bbb;
+    font-size: 12px;
+    line-height: 1.7;
+}
+.pe-picker-chip {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 5px 10px;
+    border-bottom: 1px solid #f0f0f0;
+    font-size: 12px;
+    color: #3c3c3c;
+}
+.pe-picker-chip span {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.pe-picker-chip button {
+    background: none;
+    border: none;
+    font-size: 10px;
+    color: #ccc;
+    cursor: pointer;
+    padding: 1px 3px;
+    border-radius: 2px;
+    flex-shrink: 0;
+    line-height: 1;
+}
+.pe-picker-chip button:hover { color: #c62828; background: #fde8e8; }
+#pePickerRightFooter {
+    padding: 10px 12px;
+    border-top: 1px solid #e8eaed;
+    flex-shrink: 0;
+}
+#pePickerLoadBtn {
+    width: 100%;
+    padding: 8px 14px;
+}
+#pePickerLoadBtn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
 }
 
 #paramExplorerLoading {
-    position: relative;
-    flex-shrink: 0;
+    position: absolute;
+    inset: 0;
     display: flex;
-    flex-direction: row;
     align-items: center;
     justify-content: center;
-    background: rgba(10, 19, 28, 0.92);
-    z-index: 10;
-    gap: 10px;
-    padding: 7px 16px;
-    border-radius: 4px;
-    margin-bottom: 12px;
-    backdrop-filter: blur(2px);
+    background: rgba(240, 242, 245, 0.72);
+    backdrop-filter: blur(3px);
+    z-index: 20;
+    pointer-events: all;
 }
 
-#paramExplorerLoading .spinner {
-    width: 18px;
-    height: 18px;
-    border-width: 2px;
-    flex-shrink: 0;
-    border-color: rgba(255,255,255,0.35);
-    border-top-color: #fff;
+#paramExplorerLoading > div.pe-loading-card {
+    background: #fff;
+    border-radius: 10px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.18);
+    padding: 24px 32px 20px;
+    min-width: 280px;
+    max-width: 420px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    align-items: stretch;
 }
 
 #paramExplorerProgress {
     font-size: 13px;
-    color: #fff;
+    color: #333;
     font-weight: 500;
-    text-align: left;
-    max-width: none;
+    text-align: center;
+    line-height: 1.4;
+    word-break: break-word;
+}
+
+.pe-progress-track {
+    width: 100%;
+    height: 6px;
+    background: #e0e0e0;
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.pe-progress-bar {
+    height: 100%;
+    width: 40%;
+    background: #0696d7;
+    border-radius: 3px;
+    animation: pe-progress-slide 1.2s ease-in-out infinite;
+}
+
+@keyframes pe-progress-slide {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(350%); }
 }
 
 /* ── Parameter Explorer — checklist phase ────────────────── */
@@ -969,35 +1116,64 @@ body {
     flex: 1;
     padding: 6px 0;
 }
-.pe-param-row {
-    display: flex;
+/* ── Checklist 3-column grid ───────────────────────────────── */
+.pe-checklist-grid {
+    display: grid;
     align-items: center;
-    gap: 10px;
-    padding: 7px 16px;
+    column-gap: 6px;
+}
+#peChecklistColHeader {
+    padding: 5px 16px;
+    background: #f4f5f7;
+    border-bottom: 1px solid #d5dbe1;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #586370;
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+.pe-param-row {
+    padding: 6px 16px;
     cursor: pointer;
     border-bottom: 1px solid #f0f0f0;
     transition: background 0.1s;
 }
 .pe-param-row:hover { background: #e8f0fe; }
 .pe-param-row input[type=checkbox] {
-    width: 16px; height: 16px;
+    width: 15px; height: 15px;
     cursor: pointer;
-    flex-shrink: 0;
+    margin: 0;
 }
 .pe-param-name {
-    flex: 1;
     font-size: 13px;
     color: #222;
-    word-break: break-word;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.pe-param-type-cell {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+}
+.pe-type-pill {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: white;
+    border-radius: 3px;
+    padding: 2px 5px;
+    white-space: nowrap;
+    opacity: 0.9;
 }
 .pe-param-files {
-    font-size: 11px;
-    color: #666;
-    background: #e8f0fe;
-    border-radius: 10px;
-    padding: 2px 8px;
+    font-size: 10px;
+    color: #888;
     white-space: nowrap;
-    flex-shrink: 0;
+    text-align: right;
 }
 #peComplianceSection {
     flex-shrink: 0;
@@ -1053,8 +1229,8 @@ body {
 
 .viewer-sidebar {
     width: 280px;
-    background-color: #f5f5f5;
-    border-right: 1px solid #ddd;
+    background-color: #f4f7f9;
+    border-right: 1px solid #d5dbe1;
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -1155,11 +1331,14 @@ body {
 }
 
 .viewer-sidebar-header {
-    padding: 15px;
-    background-color: #e0e0e0;
-    border-bottom: 1px solid #ccc;
-    color: #333;
+    padding: 12px 15px;
+    background-color: #0696d7;
+    border-bottom: none;
+    color: white;
     font-weight: 600;
+    font-size: 13px;
+    letter-spacing: 0.01em;
+    font-family: 'ArtifaktElement', 'Helvetica Neue', Arial, sans-serif;
 }
 
 .viewer-sidebar-content {
@@ -1168,131 +1347,17 @@ body {
     padding: 15px;
 }
 
-.category-input-group {
-    margin-bottom: 15px;
-}
-
-.category-input-group label {
-    display: block;
-    color: #333;
-    margin-bottom: 8px;
-    font-size: 13px;
-}
-
-.category-input-group input {
-    width: 100%;
-    padding: 8px 10px;
-    background-color: #ffffff;
-    border: 1px solid #ccc;
-    border-radius: 4px;
-    color: #333;
-    font-size: 14px;
-    box-sizing: border-box;
-}
-
-.category-input-group input:focus {
-    outline: none;
-    border-color: #0078d4;
-}
-
-.category-buttons {
-    display: flex;
-    gap: 8px;
-    margin-bottom: 15px;
-}
-
-.category-btn {
-    flex: 1;
-    padding: 0 12px;
-    height: 30px;
-    background-color: #0696d7;
-    border: none;
-    border-radius: 4px;
-    color: white;
-    font-size: 13px;
-    font-family: 'ArtifaktElement', 'Helvetica Neue', Arial, sans-serif;
-    font-weight: 500;
-    cursor: pointer;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    transition: background-color 0.15s;
-}
-
-.category-btn:hover {
-    background-color: #0484bd;
-}
-
-.category-btn.secondary {
-    background-color: #6a6a6a;
-}
-
-.category-btn.secondary:hover {
-    background-color: #555;
-}
-
-.category-results {
-    padding: 10px;
-    background-color: #ffffff;
-    border-radius: 4px;
-    color: #333;
-    font-size: 13px;
-    line-height: 1.6;
-    border: 1px solid #ddd;
-}
-
-.category-results.success {
-    border-left: 3px solid #4caf50;
-}
-
-.category-results.warning {
-    border-left: 3px solid #ff9800;
-}
-
-.category-results.info {
-    border-left: 3px solid #2196f3;
-}
-
-.category-group {
-    margin-bottom: 5px;
-}
-
-.category-item {
-    display: flex;
-    align-items: center;
-    padding: 8px 10px;
-    color: #e0e0e0;
-    cursor: pointer;
-    border-radius: 4px;
-    transition: background-color 0.2s;
-    font-size: 14px;
-}
-
-.category-item:hover {
-    background-color: #3a3a3a;
-}
-
-.category-item input[type="checkbox"] {
-    margin-right: 10px;
-    cursor: pointer;
-}
-
-.category-count {
-    margin-left: auto;
-    font-size: 12px;
-    color: #888;
-    padding-left: 10px;
-}
-
-.category-loading {
-    color: #888;
-    text-align: center;
-    padding: 20px;
-    font-style: italic;
-}
+/* ── Parameter Edit Table ───────────────────────────────────── */
+#peParamTable { font-family: 'ArtifaktElement', 'Helvetica Neue', Arial, sans-serif; }
+#peParamTable tr.pe-param-row { display: table-row; }
+#peParamTable tr.pe-param-row:hover > td:not(.pe-new-cell) { background: rgba(6,150,215,0.07) !important; }
+#peParamTable .pe-drag-handle:hover { color: #0696d7; }
+#peParamTable .pe-drag-handle:active { cursor: grabbing; color: #0570a3; }
+#peParamTable .pe-new-input:focus { box-shadow: 0 0 0 2px rgba(6,150,215,0.25); }
+#peParamTable .pe-new-cell:focus-within { border-color: #0696d7 !important; }
 
 .viewer-modal-header {
-    background-color: #0696d7;
+    background-color: #0a131c;
     color: white;
     padding: 0 20px;
     height: 48px;

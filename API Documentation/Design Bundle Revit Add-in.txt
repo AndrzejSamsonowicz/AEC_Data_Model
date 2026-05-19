@@ -1,0 +1,509 @@
+https://dev.to/chuongmep/use-revit-design-automation-update-revit-model-in-acc-part-1-1o31
+
+
+Use Revit Design Automation Update Revit Model In ACC (Part 1)
+#
+revitapi
+#
+autodesk
+#
+aps
+#
+forge
+Introduction
+In this guide, I will explain how to build an add-in that updates Revit models in Autodesk Construction Cloud (ACC) using Design Automation for Revit. This step-by-step approach will help everyone understand the process and best practices for integrating Revit API, Autodesk Platform Services (APS), and Forge.
+
+Revit Design Automation Support ACC
+
+Requirement
+Make sure you created an App and generated a ClientID and Client Secret
+Make sure you have knowledge about C# language
+Make sure you have access into Revit Design Automation API
+Get The Idea
+We will try with the idea to resolve how to Update Assembly Code from Revit Model
+
+ 
+
+Because update data for revit model will need the place to transfer the files, in this case we can choose format excel to exchange and bucket to storage and help transfer between local and execute.
+
+ 
+
+Some rule we need to remember :
+
+You can't use RevitAPIUI to develop because Revit Design Automation not allow to do it.
+You can't use showdialog because Revit Design Automation run as a console.
+you need to run IExternalDBApplication not is External Application
+Design Bundle Revit Add-in
+The idea is bring the Add-in to run on cloud, so the basic we need to create an bundle add-in same with the way we build
+
+From Configuration, you need to setup base library need to use first, here we will use some library :
+EPPlus : Read Excel from file extracted
+Autodesk.Forge.DesignAutomation.Revit : Main library for execute design Automation. .... Below is example setup from my project.
+
+<PropertyGroup>
+        <TargetFramework>net48</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <LangVersion>latest</LangVersion>
+        <Authors>chuongmep</Authors>
+        <PlatformTarget>x64</PlatformTarget>
+        <RootNamespace>UpdateAssemblyCodeAddIn</RootNamespace>
+        <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    </PropertyGroup>
+    <ItemGroup>
+        <PackageReference Include="EPPlus" Version="7.5.2" />
+        <Reference Include="System.IO.Compression" />
+        <Reference Include="System.Net.Http"/>
+        <PackageReference Include="Autodesk.Forge" Version="1.9.9"/>
+        <PackageReference Include="Autodesk.Forge.DesignAutomation.Revit" Version="2024.0.2"/>
+        <PackageReference Include="Chuongmep.Revit.Api.RevitAPI" Version="2024.*">
+            <ExcludeAssets>runtime</ExcludeAssets>
+        </PackageReference>
+        <PackageReference Include="Microsoft.CSharp" Version="4.7.0"/>
+        <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    </ItemGroup>
+
+
+More than that, the bundle update need to compress into Zip file, so we can define some automation job in config to do it :
+
+<Target Name="CopyFiles" AfterTargets="CoreBuild" Condition="'$(Configuration)' == 'Debug'">
+        <ItemGroup>
+            <FilesToCopy Include="$(TargetDir)*.dll" />
+        </ItemGroup>
+        <Copy SourceFiles="@(FilesToCopy)" DestinationFolder="$(ProjectDir)\UpdateAssemblyCodeAddIn.bundle\Contents\" />
+    </Target>
+    <Target Name="Zip Files" AfterTargets="CopyFiles" Condition="'$(Configuration)' == 'Debug'">
+        <ItemGroup>
+            <FilesToCopy Include="$(TargetDir)*.dll" />
+        </ItemGroup>
+        <Copy SourceFiles="@(FilesToCopy)" DestinationFolder="$(ProjectDir)\UpdateAssemblyCodeAddIn.bundle\Contents\" />
+        <Exec Command="&quot;C:\Program Files\7-Zip\7z.exe&quot; a -tzip &quot;$(ProjectDir)../Zip/UpdateAssemblyCodeAddIn.zip&quot; &quot;$(ProjectDir)UpdateAssemblyCodeAddIn.bundle\&quot;" />
+        <Copy SourceFiles="$(ProjectDir)../zip/UpdateAssemblyCodeAddIn.zip" DestinationFolder="$(ProjectDir)/Bundle-Zip/" />
+    </Target>
+
+Packagecontents
+
+<?xml version="1.0" encoding="utf-8" ?>
+<ApplicationPackage Name="DataSetParameter" Description="DataSetParameter.addin" Author="chuongmep">
+    <CompanyDetails Name="Chuongmep, Inc" Url="" Email="chuongpqvn@gmail.com"/>
+    <Components Description="Data Set Parameter">
+        <RuntimeRequirements SeriesMax="R2012" SeriesMin="R2024" Platform="Revit" OS="Win64"/>
+        <ComponentEntry LoadOnRevitStartup="True" LoadOnCommandInvocation="False" AppDescription="Data Extractor"
+                        ModuleName="./Contents/DataSetParameter.addin" Version="1.0.0"
+                        AppName="Data Set Parameter"/>
+    </Components>
+</ApplicationPackage>
+
+DataSetParameter.addin
+
+
+<?xml version="1.0" encoding="utf-8"?>
+<RevitAddIns>
+    <AddIn Type="DBApplication">
+        <Name>UpdateAssemblyCodeAddIn</Name>
+        <Assembly>UpdateAssemblyCodeAddIn.dll</Assembly>
+        <AddInId>A51A6214-5EAC-4943-A121-959AB1795C57</AddInId>
+        <FullClassName>UpdateAssemblyCodeAddIn.App</FullClassName>
+        <Description>"Update Assembly Code AddIn"</Description>
+        <VendorId>chuongmep</VendorId>
+        <VendorDescription></VendorDescription>
+    </AddIn>
+</RevitAddIns>
+
+Now from App.cs we will define execute design Automation, ProjectGuid and ModelGuid need design as a input to help change which mdodel we want to update data.
+
+using Autodesk.Revit.ApplicationServices;
+using Autodesk.Revit.DB;
+using DesignAutomationFramework;
+using Newtonsoft.Json;
+
+namespace UpdateAssemblyCodeAddIn;
+
+[Autodesk.Revit.Attributes.Regeneration(Autodesk.Revit.Attributes.RegenerationOption.Manual)]
+[Autodesk.Revit.Attributes.Transaction(Autodesk.Revit.Attributes.TransactionMode.Manual)]
+public class App : IExternalDBApplication
+{
+    public ExternalDBApplicationResult OnStartup(ControlledApplication application)
+    {
+        DesignAutomationBridge.DesignAutomationReadyEvent += HandleDesignAutomationReadyEvent;
+        return ExternalDBApplicationResult.Succeeded;
+    }
+
+    public ExternalDBApplicationResult OnShutdown(ControlledApplication application)
+    {
+        throw new NotImplementedException();
+    }
+
+    public void HandleDesignAutomationReadyEvent(object sender, DesignAutomationReadyEventArgs e)
+    {
+        e.Succeeded = true;
+        DesignAutomationData? data = e.DesignAutomationData;
+        DoJob(data);
+    }
+
+    private void DoJob(DesignAutomationData data)
+    {
+        if (data.RevitApp == null) throw new Exception("RevitApp is null with DesignAutomationData");
+        InputParams inputParams = GetInputParamsJson();
+        string? paramsRegion = inputParams.Region;
+        ModelPath cloudModelPath = null;
+        if (paramsRegion != "US")
+        {
+            cloudModelPath = ModelPathUtils.ConvertCloudGUIDsToCloudPath(ModelPathUtils.CloudRegionEMEA,
+                inputParams.ProjectGuid, inputParams.ModelGuid);
+        }
+        else
+        {
+            cloudModelPath = ModelPathUtils.ConvertCloudGUIDsToCloudPath(ModelPathUtils.CloudRegionUS,
+                inputParams.ProjectGuid, inputParams.ModelGuid);
+        }
+        Document doc = data.RevitApp.OpenDocumentFile(cloudModelPath, new OpenOptions());
+        var task = Task.Run(async () =>
+        {
+            if (string.IsNullOrEmpty(inputParams.Leg2Token)) throw new Exception("Leg2Token is null or empty");
+            string zipFilePath = await UpdateAssemblyCodeCommand.DownloadBucket(inputParams.Leg2Token);
+            return zipFilePath;
+        });
+        var message = task.GetAwaiter().GetResult();
+        Console.WriteLine($"Downloading zip file from bucket{message}");
+        UpdateAssemblyCodeCommand.Execute(doc, message);
+        Console.WriteLine(message);
+        Console.WriteLine($"Completed Update Data in Revit Model {doc.Title}.rvt");
+        // https://aps.autodesk.com/blog/design-automation-api-supports-revit-cloud-model
+        Console.WriteLine("Start Synchronize with central");
+        if (doc.IsWorkshared) // work-shared/C4R model
+        {
+            SynchronizeWithCentralOptions swc = new SynchronizeWithCentralOptions();
+            swc.SetRelinquishOptions(new RelinquishOptions(true));
+            swc.Comment = "Updated parameters by Design Automation API";
+            doc.SynchronizeWithCentral(new TransactWithCentralOptions(), swc);
+            Console.WriteLine("Synchronized with central");
+        }
+        else
+        {
+            // Single user cloud model
+            Console.WriteLine("Saving cloud model");
+            doc.SaveCloudModel();
+        }
+    }
+
+    public InputParams GetInputParamsJson()
+    {
+
+        string readAllText = File.ReadAllText("input.json");
+        var jsonConfig = new JsonSerializerSettings
+        {
+            NullValueHandling = NullValueHandling.Ignore,
+            MetadataPropertyHandling = MetadataPropertyHandling.ReadAhead,
+            ContractResolver = new Newtonsoft.Json.Serialization.DefaultContractResolver
+            {
+                NamingStrategy = new Newtonsoft.Json.Serialization.CamelCaseNamingStrategy()
+            }
+        };
+        InputParams? inputParameters = JsonConvert.DeserializeObject<InputParams>(readAllText, jsonConfig);
+        if (inputParameters == null) throw new Exception("Can't parse json input.json");
+        Console.WriteLine("Leg2Token: {0}", inputParameters.Leg2Token);
+        Console.WriteLine("ObjectKey: {0}", inputParameters.ObjectKey);
+        Console.WriteLine("ObjectId: {0}", inputParameters.ObjectId);
+        Console.WriteLine("Region: {0}", inputParameters.Region);
+        Console.WriteLine("ProjectId: {0}", inputParameters.ProjectGuid);
+        Console.WriteLine("ModelGuid: {0}", inputParameters.ModelGuid);
+        return inputParameters;
+    }
+}
+
+At AssemblyCodeData.cs we need to design mapping for excel load list data
+
+using Newtonsoft.Json;
+namespace UpdateAssemblyCodeAddIn;
+
+[Serializable]
+public class AssemblyCodeData
+{
+    [JsonProperty("Model Name")]
+    public string? ModelName { get; set; }
+    [JsonProperty("Category")]
+    public string? Category { get; set; }
+    [JsonProperty("Family Name")]
+    public string? FamilyName { get; set; }
+    [JsonProperty("Type Name")]
+    public string? TypeName { get; set; }
+    [JsonProperty("Assembly Code")]
+    public string? AssemblyCode { get; set; }
+    [JsonProperty("Assembly Description")]
+    public string? AssemblyDescription { get; set; }
+}
+
+At UpdateAssemblyCodeCommand.cs we will design main function to execute and include the way to get data from bucket storage and then use excel library to read data, finally we execute function update all information of assembly code :
+
+using System.IO.Compression;
+using System.Net.Http;
+using System.Text;
+using System.Text.Json;
+using Autodesk.Revit.DB;
+using Newtonsoft.Json;
+
+namespace UpdateAssemblyCodeAddIn;
+
+public abstract class UpdateAssemblyCodeCommand
+{
+    public static async Task<string> DownloadBucket(string accessToken)
+    {
+        string tempFolder = System.IO.Path.GetTempPath();
+        InputParams inputParams = GetInputParamsJson();
+        string? objectKey = inputParams.ObjectId;
+        string? bucketKey = inputParams.ObjectKey;
+        string url =
+            $"https://developer.api.autodesk.com/oss/v2/buckets/{bucketKey}/objects/{objectKey}/signeds3download";
+        var client = new HttpClient();
+        client.DefaultRequestHeaders.Add("Authorization",
+            "Bearer " + $"{accessToken}");
+        var response = await client.GetAsync(url);
+        string fullPath = System.IO.Path.Combine(tempFolder, objectKey);
+        if (response.IsSuccessStatusCode)
+        {
+            string? content = await response.Content.ReadAsStringAsync();
+            // get url from json object content
+            string downloadUrl = ExtractUrlFromContent(content);
+            // download
+            string filePath = await DownloadFileAsync(downloadUrl, fullPath);
+            return filePath;
+        }
+
+        throw new Exception("Failed to download file", new Exception(response.ReasonPhrase));
+    }
+    public static InputParams GetInputParamsJson()
+    {
+
+        string readAllText = File.ReadAllText("input.json");
+        var jsonConfig = new JsonSerializerSettings
+        {
+            NullValueHandling = NullValueHandling.Ignore,
+            MetadataPropertyHandling = MetadataPropertyHandling.ReadAhead,
+            ContractResolver = new Newtonsoft.Json.Serialization.DefaultContractResolver
+            {
+                NamingStrategy = new Newtonsoft.Json.Serialization.CamelCaseNamingStrategy()
+            }
+        };
+        InputParams? inputParameters = JsonConvert.DeserializeObject<InputParams>(readAllText, jsonConfig);
+        if (inputParameters == null) throw new Exception("Can't parse json input.json");
+        Console.WriteLine("Leg2Token: {0}", inputParameters.Leg2Token);
+        Console.WriteLine("ObjectKey: {0}", inputParameters.ObjectKey);
+        Console.WriteLine("ObjectId: {0}", inputParameters.ObjectId);
+        Console.WriteLine("Region: {0}", inputParameters.Region);
+        Console.WriteLine("ProjectId: {0}", inputParameters.ProjectGuid);
+        Console.WriteLine("ModelGuid: {0}", inputParameters.ModelGuid);
+        return inputParameters;
+    }
+
+    static async Task<string> DownloadFileAsync(string url, string localFilePath)
+    {
+        using (HttpClient client = new HttpClient())
+        {
+            // Download the file
+            HttpResponseMessage response = await client.GetAsync(url);
+
+            if (response.IsSuccessStatusCode)
+            {
+                // parse to json object and download
+                using (var fileStream =
+                       new FileStream(localFilePath, FileMode.Create, FileAccess.Write, FileShare.None))
+                {
+                    await response.Content.CopyToAsync(fileStream);
+                    return localFilePath;
+                }
+            }
+
+            Console.WriteLine($"Failed to download file. Status code: {response.StatusCode}");
+        }
+
+        return localFilePath;
+    }
+
+    static string ExtractUrlFromContent(string jsonContent)
+    {
+        // Parse JSON using System.Text.Json
+        using (JsonDocument doc = JsonDocument.Parse(jsonContent))
+        {
+            JsonElement root = doc.RootElement;
+
+            if (root.TryGetProperty("url", out JsonElement urlElement))
+            {
+                return urlElement.GetString() ?? string.Empty;
+            }
+        }
+
+        return string.Empty;
+    }
+    public static string Execute(Document doc, string zipFilePath)
+    {
+
+        // if files not exist in the bucket,
+        Thread.Sleep(2000);
+        if (!File.Exists(zipFilePath))
+        {
+            Console.WriteLine("Update Assembly Code", "Files not exist in the bucket");
+            return String.Empty;
+        }
+        // read a file json in zip path
+        using ZipArchive archive = ZipFile.OpenRead(zipFilePath);
+        foreach (ZipArchiveEntry entry in archive.Entries)
+        {
+            if (entry.FullName.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+            {
+                string guid = Guid.NewGuid().ToString();
+                string? folderPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), guid);
+                if (!Directory.Exists(folderPath))
+                {
+                    Directory.CreateDirectory(folderPath);
+                }
+
+                string? fileJsonPath = System.IO.Path.Combine(folderPath, entry.FullName);
+                entry.ExtractToFile(fileJsonPath);
+                string allText = System.IO.File.ReadAllText(fileJsonPath);
+                JsonSerializerSettings settings = new JsonSerializerSettings
+                {
+                    NullValueHandling = NullValueHandling.Ignore,
+                    MetadataPropertyHandling = MetadataPropertyHandling.ReadAhead,
+                    ContractResolver = new Newtonsoft.Json.Serialization.DefaultContractResolver
+                    {
+                        NamingStrategy = new Newtonsoft.Json.Serialization.CamelCaseNamingStrategy()
+                    }
+                };
+                List<AssemblyCodeData>? inputParameters =
+                    JsonConvert.DeserializeObject<List<AssemblyCodeData>>(allText, settings);
+                string report = UpdateAssemblyCodeCommand.Execute(doc, inputParameters);
+                return report;
+            }
+
+            break;
+        }
+        return String.Empty;
+
+    }
+
+    public static string Execute(Document doc, List<AssemblyCodeData> assemblyCodeDatas)
+    {
+        try
+        {
+            using Autodesk.Revit.DB.Transaction tran = new Transaction(doc,"Update Assembly Code");
+            tran.Start();
+            StringBuilder stringBuilder = new StringBuilder();
+            var familySymbols = new FilteredElementCollector(doc)
+                .OfClass(typeof(FamilySymbol))
+                .Cast<FamilySymbol>();
+            // just filters symbols have types and name in assemblyCodeDatas
+            Console.WriteLine("Total familySymbols: " + familySymbols.Count());
+            List<string> familiesNeed = assemblyCodeDatas.Select(x => x.FamilyName + "|" + x.TypeName).ToList();
+            familySymbols = familySymbols.Where(x => familiesNeed.Contains(x.FamilyName + "|" + x.Name));
+            if (!familySymbols.Any())
+            {
+                stringBuilder.AppendLine("No familySymbols found");
+                return stringBuilder.ToString();
+            }
+
+            Console.WriteLine("Start Set Assembly Code And Description for " + familySymbols.Count() + "familySymbols");
+            foreach (FamilySymbol familySymbol in familySymbols)
+            {
+                if (familySymbol.Family == null) continue;
+                var assemblyCodeData = assemblyCodeDatas.FirstOrDefault(x =>
+                    x.FamilyName?.ToLower() == familySymbol?.Family.Name.ToLower() &&
+                    x.TypeName?.ToLower() == familySymbol?.Name.ToLower());
+                if (assemblyCodeData == null) continue;
+                else
+                {
+                    stringBuilder.AppendLine("Set Assembly Code And Description for " + familySymbol.Family.Name +
+                                             " - " +
+                                             familySymbol.Name);
+                }
+
+                familySymbol.get_Parameter(BuiltInParameter.UNIFORMAT_CODE)?.Set(assemblyCodeData.AssemblyCode);
+                Parameter parameter = familySymbol.get_Parameter(BuiltInParameter.UNIFORMAT_DESCRIPTION);
+                //TODO: It just not readonly when assembly code txt file is loaded
+                if (parameter.IsReadOnly == false) parameter.Set(assemblyCodeData.AssemblyDescription);
+            }
+            tran.Commit();
+            Console.WriteLine("End Set Assembly Code And Description");
+            return stringBuilder.ToString();
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine(e.ToString());
+            throw;
+        }
+    }
+}
+
+Now, you completed all the process relate into creat a addin, in case you want to test it in local host, let's create a class command like this and try to execute it :
+
+using Autodesk.Revit.Attributes;
+using Autodesk.Revit.DB;
+using Autodesk.Revit.UI;
+using Revit.Async;
+
+namespace UpdateAssemblyCodeAddIn;
+
+[Transaction(TransactionMode.Manual)]
+public class Command : IExternalCommand
+{
+    public Autodesk.Revit.UI.Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
+    {
+        var externalCommandData = commandData;
+        RevitTask.Initialize(externalCommandData.Application);
+        RevitTask.RunAsync(async () =>
+        {
+            UIDocument uidoc = externalCommandData.Application.ActiveUIDocument;
+            Document doc = uidoc.Document;
+            await Task.Delay(1000);
+            string token = "";
+            string zipFilePath = await UpdateAssemblyCodeCommand.DownloadBucket(token);
+            string execute = UpdateAssemblyCodeCommand.Execute(doc,zipFilePath);
+            TaskDialog.Show("Result", execute);
+        });
+        return Autodesk.Revit.UI.Result.Succeeded;
+    }
+
+}
+
+Before execute testing in local, you need to use vscode extention to upload excel under zip into bucket and run the excute command after that.
+
+ 
+
+Done let's build the project and see output bundle zip, we will jump into Revit Design Automation.
+
+Revit Design Automation
+When working with the Design Automation API, the following steps are required:
+
+Convert the Revit Add-In to a Design Automation Add-In
+
+Ensure your Revit add-in is compatible with the Design Automation environment.
+
+Obtain an Access Token
+
+Authenticate using Autodesk Platform Services (APS) to acquire the necessary access token for API requests.
+
+Create a Nickname for the App
+
+Assign a unique nickname to identify your app in the Design Automation service.
+
+Upload an AppBundle to Design Automation
+
+Package and upload your add-in (as an AppBundle) to the Design Automation environment.
+
+Publish an Activity
+
+Define an activity that specifies the process, input, and output for your design automation task.
+
+Prepare Cloud Storage
+
+Set up cloud storage locations for the input and output files (e.g., Autodesk Construction Cloud or other storage services).
+
+Submit a WorkItem
+
+Send a WorkItem request to execute the activity with the specified input data and configurations.
+
+Download the Results
+
+Retrieve the processed output files from the cloud storage after the WorkItem is complete.
+
+

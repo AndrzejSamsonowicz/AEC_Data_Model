@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ApplicationPackage SchemaVersion="1.0" Version="1.0"
+  ProductCode="{3f8a1c2e-4d5b-6e7f-8a9b-0c1d2e3f4a5b}"
+  Name="UpdateParams"
+  Description="Update Revit element parameters via AEC Data Model Viewer"
+  Author="AEC Data Model Viewer">
+  <CompanyDetails Name="AEC Data Model Viewer" />
+  <RuntimeRequirements OS="Win64" Platform="Revit" SeriesMin="R2026" SeriesMax="R2030" />
+  <Components Description="Update Revit Parameters">
+    <RuntimeRequirements OS="Win64" Platform="Revit" SeriesMin="R2026" SeriesMax="R2030" />
+    <ComponentEntry AppName="UpdateParamsApp" Version="1.0"
+      ModuleName="./UpdateParamsApp.addin"
+      AppDescription="Update Revit element parameters" />
+  </Components>
+</ApplicationPackage>

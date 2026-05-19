@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RevitAddIns>
+  <AddIn Type="DBApplication">
+    <Name>UpdateParamsApp</Name>
+    <Assembly>.\UpdateParamsApp.dll</Assembly>
+    <AddInId>3f8a1c2e-4d5b-6e7f-8a9b-0c1d2e3f4a5b</AddInId>
+    <FullClassName>UpdateParams.UpdateParamsApp</FullClassName>
+    <VendorId>ADSK</VendorId>
+    <VendorDescription>AEC Data Model Viewer — Parameter Update</VendorDescription>
+  </AddIn>
+</RevitAddIns>

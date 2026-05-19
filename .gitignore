@@ -9,6 +9,9 @@ package-lock.json
 # Server settings (contains secrets)
 server-settings.json
 
+# Dev session cache (contains access tokens — never commit)
+.dev-sessions.json
+
 # Logs
 logs/
 *.log

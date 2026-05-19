@@ -11,7 +11,7 @@ async function graphqlRequest(query, variables = {}, region = null) {
     console.log(`GraphQL Request - Region: ${region}, Variables:`, variables);
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 20000); // 20s client-side timeout
+    const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s client-side timeout
 
     try {
         const response = await fetch(`${API_BASE}/api/graphql`, {
@@ -37,7 +37,7 @@ async function graphqlRequest(query, variables = {}, region = null) {
     } catch (err) {
         clearTimeout(timeoutId);
         if (err.name === 'AbortError') {
-            throw new Error('HTTP 504: Request timed out after 20 seconds');
+            throw new Error('HTTP 504: Request timed out after 60 seconds');
         }
         throw err;
     }

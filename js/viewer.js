@@ -1,4 +1,4 @@
-// Forge Viewer Initialization and Controls
+﻿// Forge Viewer Initialization and Controls
 
 async function getViewerToken(callback) {
     try {
@@ -69,6 +69,26 @@ function openViewerModal(elementGroups) {
         return;
     }
 
+    // Build DA file context from the primary file, enriching with projectId from fileSummary if available
+    if (!window._pendingDAFileContext || !window._pendingDAFileContext.fileVersionUrn) {
+        const fvu = primary.alternativeIdentifiers?.fileVersionUrn || null;
+        const summaryEntry = (window.example1State?.fileSummary || []).find(
+            s => s.fileVersionUrn === fvu || s.egId === primary.id
+        );
+        window._pendingDAFileContext = {
+            fileVersionUrn: fvu,
+            projectId:      summaryEntry?.projectId || null,
+            hubId:          summaryEntry?.hubId || window.example1State?.hubId || null,
+            region:         window.example1State?.region || null,
+            fileName:       primary.name || 'model.rvt'
+        };
+    } else {
+        if (!window._pendingDAFileContext.hubId)
+            window._pendingDAFileContext.hubId = window.example1State?.hubId || null;
+        if (!window._pendingDAFileContext.region)
+            window._pendingDAFileContext.region = window.example1State?.region || null;
+    }
+
     currentElementGroup = primary;
     currentLoadedFiles = files;
     const modal = document.getElementById('viewerModal');
@@ -79,11 +99,8 @@ function openViewerModal(elementGroups) {
     loading.style.display = 'block';
     modal.classList.add('active');
 
-    // Reset category input
-    const categoryInput = document.getElementById('categoryInput');
-    const categoryResults = document.getElementById('categoryResults');
-    if (categoryInput) categoryInput.value = '';
-    if (categoryResults) categoryResults.innerHTML = '';
+    // Populate parameter edit panel with any pending selection
+    populateParamEditPanel();
 
     // Initialize and load model(s)
     initializeViewer()
@@ -119,12 +136,6 @@ function closeViewerModal() {
         currentLoadedFiles = [];
     }
 
-    // Reset category cache and UI
-    cachedCategoryDbIds = null;
-    const categoryInput = document.getElementById('categoryInput');
-    const categoryResults = document.getElementById('categoryResults');
-    if (categoryInput) categoryInput.value = '';
-    if (categoryResults) categoryResults.innerHTML = '';
     // Hide the Show All button
     const showAllBtn = document.getElementById('viewerShowAllBtn');
     if (showAllBtn) showAllBtn.style.display = 'none';
@@ -205,11 +216,19 @@ function loadModelsInViewer(viewerInstance, files) {
         console.log(`✓ ${files.length} model(s) loaded`);
 
         extractViewerExternalIds();
+        setupViewerToSidebarSync();
 
         const onTreeCreated = () => {
-            console.log('Object tree created - loading categories');
+            console.log('Object tree created');
             viewerInstance.removeEventListener(Autodesk.Viewing.OBJECT_TREE_CREATED_EVENT, onTreeCreated);
-            showAvailableCategories();
+            // Auto-isolate specific elements (triggered from PE "Show in Viewer")
+            if (pendingRevitElementIds && pendingRevitElementIds.length > 0) {
+                const ids = pendingRevitElementIds;
+                const cat = pendingRevitCategory;
+                pendingRevitElementIds = null;
+                pendingRevitCategory = null;
+                isolateByRevitIds(ids, cat).catch(e => console.warn('Auto-isolate by Revit ID failed:', e.message));
+            }
         };
         viewerInstance.addEventListener(Autodesk.Viewing.OBJECT_TREE_CREATED_EVENT, onTreeCreated);
     })();
@@ -227,108 +246,6 @@ function extractViewerExternalIds() {
             viewerExternalIds.add(externalId);
         });
         console.log(`✓ Extracted ${viewerExternalIds.size} External IDs from viewer model`);
-    });
-}
-
-// Extract categories directly from the viewer model (faster than GraphQL API)
-async function getCategoriesFromViewer() {
-    const models = (viewer && viewer.getAllModels) ? viewer.getAllModels() : (viewer && viewer.model ? [viewer.model] : []);
-    if (!models.length) throw new Error('No models loaded');
-
-    console.log(`🔍 Extracting categories from ${models.length} model(s)...`);
-    const categoryMap = new Map();
-    cachedCategoryDbIds = new Map(); // Reset cache
-
-    for (const model of models) {
-        const instanceTree = await new Promise((resolve) => {
-            model.getObjectTree((tree) => resolve(tree), () => resolve(null));
-        });
-        if (!instanceTree) { console.log('  ⚠ getObjectTree returned null for a model, skipping'); continue; }
-
-        const allDbIds = [];
-        instanceTree.enumNodeChildren(instanceTree.getRootId(), (dbId) => {
-            allDbIds.push(dbId);
-        }, true);
-        console.log(`  model has ${allDbIds.length} nodes`);
-
-        await new Promise((resolve) => {
-            model.getBulkProperties(allDbIds, { propFilter: ['Category'] }, (results) => {
-                results.forEach(result => {
-                    const categoryProp = result.properties.find(p => p.displayName === 'Category');
-                    if (categoryProp && categoryProp.displayValue) {
-                        const name = categoryProp.displayValue.replace(/^Revit\s+/i, '');
-                        categoryMap.set(name, (categoryMap.get(name) || 0) + 1);
-                        // Cache: store model+dbId per category for fast filtering
-                        if (!cachedCategoryDbIds.has(name)) cachedCategoryDbIds.set(name, []);
-                        const entries = cachedCategoryDbIds.get(name);
-                        let modelEntry = entries.find(e => e.model === model);
-                        if (!modelEntry) { modelEntry = { model, dbIds: [] }; entries.push(modelEntry); }
-                        modelEntry.dbIds.push(result.dbId);
-                    }
-                });
-                resolve();
-            }, () => { console.warn('getBulkProperties failed for a model'); resolve(); });
-        });
-    }
-
-    const categories = Array.from(categoryMap.entries())
-        .map(([value, count]) => ({ value, count }))
-        .sort((a, b) => a.value.localeCompare(b.value));
-
-    console.log(`✓ Extracted ${categories.length} categories across ${models.length} model(s), cached for filtering`);
-    return categories;
-}
-
-// INVESTIGATION: Filter by category using ONLY Forge Viewer (no GraphQL)
-async function filterByCategoryInViewer(categoryName) {
-    return new Promise((resolve, reject) => {
-        if (!viewer || !viewer.model) {
-            reject(new Error('Viewer or model not loaded'));
-            return;
-        }
-
-        console.log(`🔍 Filtering by category "${categoryName}" using Forge Viewer only...`);
-        
-        const instanceTree = viewer.model.getInstanceTree();
-        if (!instanceTree) {
-            reject(new Error('Instance tree not available'));
-            return;
-        }
-
-        // Get all dbIds
-        const allDbIds = [];
-        instanceTree.enumNodeChildren(instanceTree.getRootId(), (dbId) => {
-            allDbIds.push(dbId);
-        }, true);
-
-        console.log(`   Total objects: ${allDbIds.length}`);
-
-        // Get Category property for all objects and filter
-        viewer.model.getBulkProperties(allDbIds, { propFilter: ['Category'] }, (results) => {
-            const matchingDbIds = [];
-            
-            results.forEach(result => {
-                const categoryProp = result.properties.find(p => p.displayName === 'Category');
-                if (categoryProp && categoryProp.displayValue) {
-                    let catName = categoryProp.displayValue.replace(/^Revit\s+/i, '');
-                    if (catName === categoryName) {
-                        matchingDbIds.push(result.dbId);
-                    }
-                }
-            });
-
-            console.log(`✓ Found ${matchingDbIds.length} elements in category "${categoryName}"`);
-            console.log(`   Isolating in viewer...`);
-            
-            // Isolate these elements in the viewer
-            viewer.isolate(matchingDbIds);
-            viewer.fitToView(matchingDbIds);
-            
-            resolve(matchingDbIds);
-        }, (error) => {
-            console.error('Error filtering by category:', error);
-            reject(error);
-        });
     });
 }
 
@@ -362,14 +279,17 @@ async function isolateByRevitIds(revitIds, category) {
     const matchingDbIds = await new Promise((resolve, reject) => {
         modelRef.getBulkProperties(dbIdsToScan, {}, results => {
             const hits = [];
+            // Piggyback: build / extend the revitId→dbId cache for PE row-click coloring.
+            if (!window._peRevitDbIdCache) window._peRevitDbIdCache = new Map();
+            const peCache = window._peRevitDbIdCache;
             results.forEach(result => {
                 for (const p of result.properties) {
-                    if (idSet.has(String(p.displayValue))) {
-                        const nameLower = (p.displayName || '').toLowerCase();
-                        if (nameLower.includes('elementid') || nameLower.includes('element id') || nameLower.includes('element_id')) {
-                            hits.push(result.dbId);
-                            break;
-                        }
+                    const nameLower = (p.displayName || '').toLowerCase();
+                    if (nameLower.includes('elementid') || nameLower.includes('element id') || nameLower.includes('element_id')) {
+                        const valStr = String(p.displayValue);
+                        peCache.set(valStr, result.dbId);
+                        if (idSet.has(valStr)) hits.push(result.dbId);
+                        break;
                     }
                 }
             });
@@ -401,112 +321,6 @@ async function isolateByRevitIds(revitIds, category) {
     }
     return matchingDbIds;
 }
-async function inspectWallProperties() {
-    return new Promise((resolve, reject) => {
-        if (!viewer || !viewer.model) {
-            reject(new Error('Viewer or model not loaded'));
-            return;
-        }
-
-        console.log('🔍 Inspecting Wall properties...');
-        
-        const instanceTree = viewer.model.getInstanceTree();
-        if (!instanceTree) {
-            reject(new Error('Instance tree not available'));
-            return;
-        }
-
-        // Get all dbIds
-        const allDbIds = [];
-        instanceTree.enumNodeChildren(instanceTree.getRootId(), (dbId) => {
-            allDbIds.push(dbId);
-        }, true);
-
-        // First, find Wall elements
-        viewer.model.getBulkProperties(allDbIds, { propFilter: ['Category'] }, (results) => {
-            const wallDbIds = [];
-            
-            results.forEach(result => {
-                const categoryProp = result.properties.find(p => p.displayName === 'Category');
-                if (categoryProp && categoryProp.displayValue) {
-                    let catName = categoryProp.displayValue.replace(/^Revit\s+/i, '');
-                    if (catName === 'Walls') {
-                        wallDbIds.push(result.dbId);
-                    }
-                }
-            });
-
-            console.log(`   Found ${wallDbIds.length} Wall elements`);
-
-            if (wallDbIds.length === 0) {
-                resolve({ dbIds: [], properties: [] });
-                return;
-            }
-
-            // Get ALL properties for first 3 walls
-            const sampleDbIds = wallDbIds.slice(0, 3);
-            console.log(`   Getting all properties for ${sampleDbIds.length} sample walls...`);
-
-            viewer.model.getBulkProperties(sampleDbIds, {}, (wallResults) => {
-                console.log('\n📋 WALL PROPERTIES AVAILABLE:');
-                console.log('================================');
-                
-                // Get unique property names across all sample walls
-                const allPropNames = new Set();
-                wallResults.forEach((result, idx) => {
-                    console.log(`\n🧱 Wall ${idx + 1} (dbId: ${result.dbId}):`);
-                    console.log(`   Total properties: ${result.properties.length}`);
-                    
-                    result.properties.forEach(prop => {
-                        allPropNames.add(prop.displayName);
-                        if (idx === 0) { // Log all properties for first wall
-                            console.log(`   - ${prop.displayName}: ${prop.displayValue} ${prop.units || ''}`);
-                        }
-                    });
-                });
-
-                console.log(`\n📊 UNIQUE PROPERTY NAMES (${allPropNames.size} total):`);
-                Array.from(allPropNames).sort().forEach(name => {
-                    console.log(`   - ${name}`);
-                });
-
-                resolve({
-                    dbIds: wallDbIds,
-                    sampleProperties: wallResults,
-                    uniquePropertyNames: Array.from(allPropNames)
-                });
-            }, (error) => {
-                console.error('Error getting wall properties:', error);
-                reject(error);
-            });
-        }, (error) => {
-            console.error('Error finding walls:', error);
-            reject(error);
-        });
-    });
-}
-
-// Filter elements to only include those with External IDs present in the viewer
-function filterViewableElements(elements) {
-    if (viewerExternalIds.size === 0) {
-        console.warn('⚠ Viewer External IDs not yet loaded, returning all elements');
-        return elements;
-    }
-    
-    const viewableElements = elements.filter(element => {
-        if (element.properties?.results) {
-            const externalIdProp = element.properties.results.find(p => p.name === 'External ID');
-            if (externalIdProp && externalIdProp.value) {
-                return viewerExternalIds.has(externalIdProp.value);
-            }
-        }
-        return false;
-    });
-    
-    console.log(`🔍 Filtered to viewable elements: ${viewableElements.length}/${elements.length} (${Math.round(viewableElements.length/elements.length*100)}% viewable)`);
-    
-    return viewableElements;
-}
 
 function highlightElementInViewer(dbId) {
     if (!viewer) return;
@@ -532,68 +346,6 @@ function highlightElementInViewer(dbId) {
     displayElementProperties(dbId);
     
     console.log(`✓ Highlighted element dbId ${dbId} in red`);
-}
-
-// Isolate elements in viewer and display them in sidebar
-async function isolateAndDisplayElements(dbIds, elements, categoryNames) {
-    if (!viewer || !viewer.model) return;
-    
-    // Isolate and fit view
-    viewer.isolate(dbIds);
-    viewer.fitToView(dbIds);
-    
-    // Build element-to-dbId mapping for interactive highlighting
-    filteredElementsMap.clear();
-    elementDataMap.clear();
-    
-    // Get the external ID mapping from viewer (async callback)
-    viewer.model.getExternalIdMapping((externalIdMapping) => {
-        // Build the mapping
-        elements.forEach(element => {
-            // Extract External ID from element properties
-            if (element.properties?.results) {
-                const externalIdProp = element.properties.results.find(p => p.name === 'External ID');
-                if (externalIdProp && externalIdProp.value) {
-                    const dbId = externalIdMapping[externalIdProp.value];
-                    if (dbId) {
-                        filteredElementsMap.set(element.id, dbId);
-                        elementDataMap.set(dbId, element); // Store full element data by dbId
-                    }
-                }
-            }
-        });
-        console.log(`✓ Created mapping for ${filteredElementsMap.size} elements`);
-        
-        // Display elements in sidebar
-        const sidebar = document.getElementById('elementList');
-        if (!sidebar) return;
-        
-        const categoryLabel = Array.isArray(categoryNames) ? categoryNames.join(', ') : categoryNames;
-        
-        let html = `<div style="padding: 10px; background: #2196f3; color: white; font-weight: bold; margin-bottom: 5px; border-radius: 4px;">`;
-        html += `${dbIds.length} element(s) - ${categoryLabel}`;
-        html += `</div>`;
-        html += '<div class="category-results-hint" style="padding: 8px; background: #e3f2fd; color: #1976d2; font-size: 12px; margin-bottom: 5px; border-radius: 4px;">💡 Click elements in viewer or list for highlighting</div>';
-        
-        elements.slice(0, Math.min(200, elements.length)).forEach((element, index) => {
-            const dbId = filteredElementsMap.get(element.id);
-            if (dbId) {
-                html += `<div class="element-list-item" data-dbid="${dbId}" onclick="highlightElementInViewer(${dbId})" style="padding: 8px; border-bottom: 1px solid #ddd; font-size: 13px; cursor: pointer; transition: background 0.2s; background: white;" onmouseover="this.style.background='#e3f2fd'" onmouseout="this.style.background='white'">`;
-                html += `<strong style="color: #333;">${index + 1}. ${element.name || 'Unnamed'}</strong><br/>`;
-                html += `<span style="color: #666; font-size: 11px;">ID: ${element.id}</span>`;
-                html += `</div>`;
-            }
-        });
-        
-        if (elements.length > 200) {
-            html += `<div style="padding: 8px; color: #666; font-size: 12px; text-align: center;">... and ${elements.length - 200} more</div>`;
-        }
-        
-        sidebar.innerHTML = html;
-        
-        // Setup bidirectional interaction: clicking in viewer highlights in sidebar
-        setupViewerToSidebarSync();
-    });
 }
 
 // Display element properties in the properties panel
@@ -731,1109 +483,762 @@ function handleViewerSelection(event) {
     }
 }
 
-// ─── Compliance Check: AEC DM value distribution + Viewer highlighting ───────
+// ─── Parameter Edit Panel ─────────────────────────────────────────────────────
 
-async function runComplianceCheck() {
-    const category       = (document.getElementById('compCategory')?.value || '').trim();
-    const paramName      = (document.getElementById('compParamName')?.value || '').trim();
-    const allowedRaw     = (document.getElementById('compAllowedValues')?.value || '').trim();
-    const resultsDiv     = document.getElementById('complianceResults');
+window._peTableState = window._peTableState || {
+    selected: new Set(),   // Set<number> — selected row indices
+    lastClick: -1,
+    dragSrc: -1,
+    cellSelected: new Set(), // Set<number> — selected "New Value" cell indices
+    lastCellClick: -1
+};
+var _peDragHandleDown = false;
+var _peHighlightTimer = null;
 
-    if (!category || !paramName || !allowedRaw) {
-        if (resultsDiv) resultsDiv.innerHTML = `<div class="category-results warning">Please fill in all three fields.</div>`;
+function populateParamEditPanel() {
+    const panel = document.getElementById('paramEditPanel');
+    if (!panel) return;
+    const rows = window._pendingParamEditRows || [];
+    if (rows.length === 0) {
+        panel.innerHTML = '<div style="padding:4px 0 12px;color:#888;font-size:12px;line-height:1.5;">Select parameters in the treemap and click \u201cShow in Viewer \u25ba\u201d to populate this panel.</div>';
         return;
     }
+    const st = window._peTableState;
+    st.selected = new Set();
+    st.lastClick = -1;
+    st.dragSrc = -1;
+    st.cellSelected = new Set();
+    st.lastCellClick = -1;
+    window._peRevitDbIdCache = null;   // clear scan cache whenever new rows are loaded
+    _peRenderParamTable(panel, rows);
+}
 
-    const allowedValues = allowedRaw.split(',').map(v => v.trim()).filter(Boolean);
+function _peRenderParamTable(panel, rows) {
+    const st = window._peTableState;
+    let html = '<div style="overflow-x:hidden;margin-bottom:2px;">';
+    html += '<table id="peParamTable" style="width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed;font-family:\'ArtifaktElement\',\'Helvetica Neue\',Arial,sans-serif;">';
+    html += '<colgroup><col style="width:20px"><col style="width:35%"><col style="width:25%"><col></colgroup>';
+    html += '<thead><tr style="background:#0696d7;color:white;user-select:none;letter-spacing:0.01em;">';
+    html += '<th style="padding:7px 3px;"></th>';
+    html += '<th style="padding:7px 6px;text-align:left;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;">Parameter</th>';
+    html += '<th style="padding:7px 6px;text-align:left;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;">Current</th>';
+    html += '<th style="padding:7px 6px;text-align:left;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;">New Value</th>';
+    html += '</tr></thead>';
+    html += '<tbody id="peParamTbody">';
+    rows.forEach(function(row, i) {
+        const isSel = st.selected.has(i);
+        const bg = isSel ? '#e3f4fc' : (i % 2 === 0 ? '#ffffff' : '#f4f7f9');
+        const bleft = isSel ? '3px solid #0696d7' : '3px solid transparent';
+        const isCellSel = st.cellSelected.has(i);
+        const cellBg = isCellSel ? '#e3f4fc' : '#ffffff';
+        const cellBorder = isCellSel ? '1px solid #0696d7' : '1px solid #d5dbe1';
+        html += '<tr draggable="true" data-idx="' + i + '" class="pe-param-row"'
+             + ' style="background:' + bg + ';border-left:' + bleft + ';border-bottom:1px solid #d5dbe1;cursor:default;transition:background 0.1s;">';
+        html += '<td class="pe-drag-handle" style="padding:4px 3px;text-align:center;color:#b0bec5;cursor:grab;font-size:14px;user-select:none;" title="Drag to reorder">\u2630</td>';
+        html += '<td style="padding:6px 7px;color:#3c3c3c;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;" title="' + _peEscapeHtml(row.paramName) + '">'
+             + _peEscapeHtml(row.paramName)
+             + '</td>';
+        html += '<td style="padding:6px 7px;color:#586370;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;" title="' + _peEscapeHtml(row.currentValue) + '">' + _peEscapeHtml(row.currentValue) + '</td>';
+        html += '<td class="pe-new-cell" data-idx="' + i + '" style="padding:3px 4px;background:' + cellBg + ';border:' + cellBorder + ';box-sizing:border-box;">';
+        html += '<input type="text" class="pe-new-input" data-idx="' + i + '" value="' + _peEscapeHtml(row.newValue || '') + '" placeholder="\u2014"'
+             + ' style="width:100%;padding:3px 5px;border:none;background:transparent;font-size:12px;font-family:\'ArtifaktElement\',\'Helvetica Neue\',Arial,sans-serif;box-sizing:border-box;outline:none;color:#3c3c3c;">';
+        html += '</td>';
+        html += '</tr>';
+    });
+    html += '</tbody></table></div>';
+    html += '<button onclick="applyParamChangesViaDA()" style="margin-top:10px;width:100%;padding:9px 16px;background:#0696d7;color:white;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:600;font-family:\'ArtifaktElement\',\'Helvetica Neue\',Arial,sans-serif;letter-spacing:0.01em;transition:background 0.15s;">Apply via Design Automation \u25ba</button>';
+    panel.innerHTML = html;
+    _peBindTableEvents();
+}
 
-    if (resultsDiv) resultsDiv.innerHTML = `<div class="category-results info">⏳ Step 1/2: Querying AEC DM for value distribution...</div>`;
+function _peBindTableEvents() {
+    const tbody = document.getElementById('peParamTbody');
+    if (!tbody) return;
+    const st = window._peTableState;
 
-    // ── Step 1: AEC DM — get value distribution (fast, server-side) ──
-    let aecValueMap = null;
-    try {
-        aecValueMap = await queryDistinctPropertyValues(category, paramName);
-    } catch (e) {
-        console.warn('AEC DM distinct values query failed (non-critical):', e.message);
-    }
+    // ── Unified mousedown (row selection + cell selection) ───────────────────
+    tbody.addEventListener('mousedown', function(e) {
+        const td = e.target.closest('td.pe-new-cell');
+        const tr = e.target.closest('tr.pe-param-row');
+        if (!tr) return;
+        const idx = parseInt(tr.dataset.idx, 10);
+        if (isNaN(idx)) return;
 
-    // ── Step 2: Viewer — scan loaded elements for violations ──
-    if (resultsDiv) resultsDiv.innerHTML = `<div class="category-results info">⏳ Step 2/2: Scanning viewer elements...</div>`;
-
-    if (!cachedCategoryDbIds || !cachedCategoryDbIds.has(category)) {
-        if (resultsDiv) resultsDiv.innerHTML = `<div class="category-results warning">Category "<strong>${category}</strong>" not found in the viewer. Check the spelling matches the Category Filter panel above.</div>`;
-        return;
-    }
-
-    // Collect dbIds per model for the given category
-    const catEntries = cachedCategoryDbIds.get(category) || [];
-    const modelDbIdsMap = new Map();
-    for (const { model, dbIds } of catEntries) {
-        if (!modelDbIdsMap.has(model)) modelDbIdsMap.set(model, []);
-        modelDbIdsMap.get(model).push(...dbIds);
-    }
-
-    // Isolate the category in the viewer
-    const allModels = (viewer && viewer.getAllModels) ? viewer.getAllModels() : (viewer && viewer.model ? [viewer.model] : []);
-    for (const model of allModels) {
-        const dbIds = modelDbIdsMap.get(model);
-        if (dbIds && dbIds.length > 0) {
-            viewer.isolate(dbIds, model);
-        } else {
-            const tree = model.getInstanceTree();
-            if (tree) viewer.hide(tree.getRootId(), model);
+        // Drag handle: set flag, skip selection
+        if (e.target.closest('.pe-drag-handle')) {
+            _peDragHandleDown = true;
+            return;
         }
+
+        // New Value cell clicked
+        if (td) {
+            if (e.shiftKey && st.lastCellClick >= 0) {
+                e.preventDefault();
+                const lo = Math.min(st.lastCellClick, idx);
+                const hi = Math.max(st.lastCellClick, idx);
+                if (!e.ctrlKey && !e.metaKey) st.cellSelected.clear();
+                for (let i = lo; i <= hi; i++) st.cellSelected.add(i);
+            } else {
+                st.cellSelected.clear();
+                st.cellSelected.add(idx);
+                st.lastCellClick = idx;
+            }
+            _peRefreshRowStyles();
+            return; // don't trigger row selection
+        }
+
+        // Input click: don't hijack
+        if (e.target.tagName === 'INPUT') return;
+
+        // Row click (parameter / current value columns)
+        e.preventDefault();
+        if (e.shiftKey && st.lastClick >= 0) {
+            const lo = Math.min(st.lastClick, idx);
+            const hi = Math.max(st.lastClick, idx);
+            if (!e.ctrlKey && !e.metaKey) st.selected.clear();
+            for (let i = lo; i <= hi; i++) st.selected.add(i);
+        } else if (e.ctrlKey || e.metaKey) {
+            if (st.selected.has(idx)) st.selected.delete(idx);
+            else st.selected.add(idx);
+            st.lastClick = idx;
+        } else {
+            const wasSingleThis = st.selected.size === 1 && st.selected.has(idx);
+            st.selected.clear();
+            if (!wasSingleThis) { st.selected.add(idx); st.lastClick = idx; }
+            else st.lastClick = -1;
+        }
+        st.cellSelected.clear();
+        _peRefreshRowStyles();
+        _peHighlightSelectedInViewer();
+    });
+
+    // ── Save newValue on input ───────────────────────────────────────────────
+    tbody.addEventListener('input', function(e) {
+        if (!e.target.classList.contains('pe-new-input')) return;
+        const idx = parseInt(e.target.dataset.idx, 10);
+        const rows = window._pendingParamEditRows || [];
+        if (!isNaN(idx) && rows[idx]) rows[idx].newValue = e.target.value;
+    });
+
+    // ── Paste multi-line (Excel-style column paste) ──────────────────────────
+    tbody.addEventListener('paste', function(e) {
+        if (!e.target.classList.contains('pe-new-input')) return;
+        const idx = parseInt(e.target.dataset.idx, 10);
+        if (isNaN(idx)) return;
+        const text = (e.clipboardData || window.clipboardData).getData('text');
+        const lines = text.split(/\r?\n/);
+        // Trim single trailing empty line that Excel appends
+        if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+        if (lines.length <= 1) return; // single value — let browser paste normally
+        e.preventDefault();
+        const rows = window._pendingParamEditRows || [];
+        lines.forEach(function(line, offset) {
+            const ti = idx + offset;
+            if (ti >= rows.length) return;
+            rows[ti].newValue = line;
+            const inp = tbody.querySelector('.pe-new-input[data-idx="' + ti + '"]');
+            if (inp) inp.value = line;
+        });
+    });
+
+    // ── Right-click context menu on New Value cells ──────────────────────────
+    tbody.addEventListener('contextmenu', function(e) {
+        if (!e.target.closest('td.pe-new-cell') && !e.target.closest('input.pe-new-input')) return;
+        e.preventDefault();
+        const idx = parseInt((e.target.closest('[data-idx]') || {}).dataset.idx, 10);
+        if (!isNaN(idx)) _peShowContextMenu(e.clientX, e.clientY, idx);
+    });
+
+    // ── Drag & drop (handle only) ────────────────────────────────────────────
+    tbody.addEventListener('dragstart', function(e) {
+        if (!_peDragHandleDown) { e.preventDefault(); return; }
+        _peDragHandleDown = false;
+        const tr = e.target.closest('tr.pe-param-row');
+        if (!tr) return;
+        st.dragSrc = parseInt(tr.dataset.idx, 10);
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', String(st.dragSrc)); // required by Firefox
+        // Dim all rows being dragged (all selected if dragSrc is part of selection)
+        var toDim = (st.selected.has(st.dragSrc) && st.selected.size > 1)
+            ? Array.from(st.selected)
+            : [st.dragSrc];
+        toDim.forEach(function(i) {
+            var row = tbody.querySelector('tr.pe-param-row[data-idx="' + i + '"]');
+            if (row) row.style.opacity = '0.45';
+        });
+    });
+
+    tbody.addEventListener('dragover', function(e) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        const tr = e.target.closest('tr.pe-param-row');
+        tbody.querySelectorAll('tr.pe-param-row').forEach(function(r) { r.style.boxShadow = ''; });
+        if (tr) tr.style.boxShadow = 'inset 0 -2px 0 #0696d7';
+    });
+
+    tbody.addEventListener('dragleave', function(e) {
+        if (!tbody.contains(e.relatedTarget)) {
+            tbody.querySelectorAll('tr.pe-param-row').forEach(function(r) { r.style.boxShadow = ''; });
+        }
+    });
+
+    tbody.addEventListener('drop', function(e) {
+        e.preventDefault();
+        tbody.querySelectorAll('tr.pe-param-row').forEach(function(r) { r.style.boxShadow = ''; r.style.opacity = ''; });
+        const tr = e.target.closest('tr.pe-param-row');
+        if (!tr || st.dragSrc < 0) return;
+        const destIdx = parseInt(tr.dataset.idx, 10);
+        if (isNaN(destIdx)) return;
+        const rows = window._pendingParamEditRows || [];
+
+        // Determine which rows to move: all selected when dragSrc is part of selection
+        var dragIndices = (st.selected.has(st.dragSrc) && st.selected.size > 1)
+            ? Array.from(st.selected).sort(function(a, b) { return a - b; })
+            : [st.dragSrc];
+
+        // No-op: dropping in same spot, or dropping onto the selection itself
+        if (dragIndices.length === 1 && dragIndices[0] === destIdx) { st.dragSrc = -1; return; }
+        if (dragIndices.indexOf(destIdx) >= 0) { st.dragSrc = -1; return; }
+
+        // Extract rows in their current order
+        var dragged = dragIndices.map(function(i) { return rows[i]; });
+        // Remove from high index to low so earlier indices stay valid
+        for (var k = dragIndices.length - 1; k >= 0; k--) {
+            rows.splice(dragIndices[k], 1);
+        }
+        // Adjust insert position: how many dragged rows were before destIdx?
+        var insertAt = destIdx - dragIndices.filter(function(i) { return i < destIdx; }).length;
+        insertAt = Math.max(0, Math.min(insertAt, rows.length));
+        // Insert all dragged rows together
+        dragged.forEach(function(r, k) { rows.splice(insertAt + k, 0, r); });
+        // Update selection to the new positions
+        st.selected = new Set();
+        for (var k = 0; k < dragged.length; k++) st.selected.add(insertAt + k);
+        st.dragSrc = -1;
+        _peRenderParamTable(document.getElementById('paramEditPanel'), rows);
+    });
+
+    tbody.addEventListener('dragend', function() {
+        tbody.querySelectorAll('tr.pe-param-row').forEach(function(r) { r.style.boxShadow = ''; r.style.opacity = ''; });
+        _peDragHandleDown = false;
+        st.dragSrc = -1;
+    });
+
+    // Reset drag flag on mouseup anywhere
+    document.removeEventListener('mouseup', _peClearDragFlag);
+    document.addEventListener('mouseup', _peClearDragFlag);
+
+    // ── Keyboard Ctrl+C: copy New Value column selection ────────────────────
+    document.removeEventListener('keydown', _peKeyHandler);
+    document.addEventListener('keydown', _peKeyHandler);
+}
+
+function _peClearDragFlag() { _peDragHandleDown = false; }
+
+function _peRemapIndices(set, src, dst) {
+    const out = new Set();
+    set.forEach(function(i) {
+        if (i === src) { out.add(dst); return; }
+        if (src < dst) {
+            if (i > src && i <= dst) out.add(i - 1);
+            else out.add(i);
+        } else {
+            if (i >= dst && i < src) out.add(i + 1);
+            else out.add(i);
+        }
+    });
+    return out;
+}
+
+function _peKeyHandler(e) {
+    // Auto-remove when panel is gone
+    if (!document.getElementById('peParamTbody')) {
+        document.removeEventListener('keydown', _peKeyHandler);
+        return;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') {
+        const st = window._peTableState;
+        if (st.cellSelected.size === 0) return;
+        const rows = window._pendingParamEditRows || [];
+        const text = Array.from(st.cellSelected).sort(function(a, b) { return a - b; })
+            .map(function(i) { return rows[i] ? (rows[i].newValue || '') : ''; }).join('\n');
+        navigator.clipboard.writeText(text).catch(function() {
+            const ta = Object.assign(document.createElement('textarea'), { value: text });
+            ta.style.cssText = 'position:fixed;opacity:0;top:0;left:0;';
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+        });
+        e.preventDefault();
+    }
+}
+
+function _peRefreshRowStyles() {
+    const st = window._peTableState;
+    const rows = window._pendingParamEditRows || [];
+    document.querySelectorAll('#peParamTbody tr.pe-param-row').forEach(function(tr) {
+        const i = parseInt(tr.dataset.idx, 10);
+        const isSel = st.selected.has(i);
+        tr.style.background = isSel ? '#dceeff' : (i % 2 === 0 ? '#ffffff' : '#f6f8fb');
+        tr.style.borderLeft = isSel ? '3px solid #1565c0' : '3px solid transparent';
+    });
+    document.querySelectorAll('#peParamTbody td.pe-new-cell').forEach(function(td) {
+        const i = parseInt(td.dataset.idx, 10);
+        const isCellSel = st.cellSelected.has(i);
+        td.style.background = isCellSel ? '#fff3cd' : '#ffffff';
+        td.style.border = isCellSel ? '1px solid #f0a500' : '1px solid #d0d0d0';
+    });
+}
+
+function _peShowContextMenu(x, y, idx) {
+    _peDismissContextMenu();
+    const rows = window._pendingParamEditRows || [];
+    const inp = document.querySelector('#peParamTbody .pe-new-input[data-idx="' + idx + '"]');
+    const val = inp ? inp.value : (rows[idx] ? (rows[idx].newValue || '') : '');
+    const st = window._peTableState;
+
+    const menu = document.createElement('div');
+    menu.id = 'peContextMenu';
+    menu.style.cssText = 'position:fixed;left:' + x + 'px;top:' + y + 'px;'
+        + 'background:#fff;border:1px solid #d0d0d0;border-radius:5px;'
+        + 'box-shadow:0 4px 14px rgba(0,0,0,.18);z-index:99999;'
+        + 'font-size:13px;min-width:160px;overflow:hidden;';
+
+    function menuItem(label, fn, disabled) {
+        const d = document.createElement('div');
+        d.textContent = label;
+        d.style.cssText = 'padding:8px 14px;cursor:' + (disabled ? 'default' : 'pointer')
+            + ';color:' + (disabled ? '#bbb' : '#222') + ';';
+        if (!disabled) {
+            d.addEventListener('mouseenter', function() { d.style.background = '#e8f0fe'; });
+            d.addEventListener('mouseleave', function() { d.style.background = ''; });
+            d.addEventListener('mousedown', function(e) {
+                e.stopPropagation();
+                fn();
+                _peDismissContextMenu();
+            });
+        }
+        menu.appendChild(d);
+    }
+    function sep() {
+        const s = document.createElement('div');
+        s.style.cssText = 'border-top:1px solid #eee;margin:3px 0;';
+        menu.appendChild(s);
     }
 
-    // Scan element properties and highlight violations red
-    viewer.clearThemingColors();
-    const RED   = new THREE.Vector4(1, 0, 0, 1);
+    menuItem('Fill Down', function() {
+        for (let i = idx; i < rows.length; i++) {
+            rows[i].newValue = val;
+            const x = document.querySelector('#peParamTbody .pe-new-input[data-idx="' + i + '"]');
+            if (x) x.value = val;
+        }
+    }, !val);
 
-    let totalElements = 0;
-    const violations = [];
+    menuItem('Fill Selection (' + (st.cellSelected.size || 1) + ' cells)', function() {
+        (st.cellSelected.size > 0 ? st.cellSelected : new Set([idx])).forEach(function(i) {
+            rows[i].newValue = val;
+            const x = document.querySelector('#peParamTbody .pe-new-input[data-idx="' + i + '"]');
+            if (x) x.value = val;
+        });
+    }, !val);
 
-    for (const [model, dbIds] of modelDbIdsMap) {
-        totalElements += dbIds.length;
-        await new Promise((resolve, reject) => {
-            model.getBulkProperties(dbIds, { propFilter: [paramName] }, (results) => {
-                for (const elem of results) {
-                    const prop = elem.properties?.find(
-                        p => p.attributeName === paramName || p.displayName === paramName
-                    );
-                    const val = prop ? String(prop.displayValue ?? '') : '';
-                    if (!val || !allowedValues.includes(val)) {
-                        viewer.setThemingColor(elem.dbId, RED, model);
-                        violations.push({ dbId: elem.dbId, value: val || '(empty)' });
+    sep();
+
+    menuItem('Clear Cell', function() {
+        rows[idx].newValue = '';
+        if (inp) inp.value = '';
+    });
+    menuItem('Clear All', function() {
+        rows.forEach(function(r) { r.newValue = ''; });
+        document.querySelectorAll('#peParamTbody .pe-new-input').forEach(function(x) { x.value = ''; });
+    });
+
+    document.body.appendChild(menu);
+    // Flip left if off-screen
+    const rect = menu.getBoundingClientRect();
+    if (rect.right > window.innerWidth) menu.style.left = (x - rect.width) + 'px';
+    if (rect.bottom > window.innerHeight) menu.style.top = (y - rect.height) + 'px';
+
+    setTimeout(function() {
+        document.addEventListener('mousedown', _peDismissContextMenu, { once: true });
+    }, 0);
+}
+
+function _peDismissContextMenu() {
+    const m = document.getElementById('peContextMenu');
+    if (m) m.parentNode.removeChild(m);
+}
+
+function _peHighlightSelectedInViewer() {
+    clearTimeout(_peHighlightTimer);
+    _peHighlightTimer = setTimeout(async function() {
+        if (!viewer || !viewer.model) return;
+        const st     = window._peTableState;
+        const rows   = window._pendingParamEditRows || [];
+
+        if (st.selected.size === 0) {
+            viewer.showAll();
+            viewer.clearThemingColors();
+            const btn = document.getElementById('viewerShowAllBtn');
+            if (btn) btn.style.display = 'none';
+            return;
+        }
+
+        // All rows supply the full context (red); selected row(s) get the focus color (blue)
+        const allRevitIds   = [];
+        const focusRevitIds = [];
+        rows.forEach(function(r) { if (r && r.revitIds) allRevitIds.push(...r.revitIds); });
+        st.selected.forEach(function(i) { if (rows[i] && rows[i].revitIds) focusRevitIds.push(...rows[i].revitIds); });
+
+        if (focusRevitIds.length === 0) {
+            console.warn('No Revit IDs for selected row(s) — cannot highlight.');
+            return;
+        }
+        try { await _peIsolateWithFocus(allRevitIds, focusRevitIds); }
+        catch(e) { console.warn('Row highlight failed:', e.message); }
+    }, 80);
+}
+
+// Isolate all matched elements, colour context=red, focus=blue.
+// The cache is built by the initial isolateByRevitIds full-model scan (piggybacked above).
+// Falls back to its own scan if the viewer was reloaded without a prior isolateByRevitIds call.
+async function _peIsolateWithFocus(allRevitIds, focusRevitIds) {
+    const modelRef = viewer.model;
+
+    // Build cache if missing — same proven logic as isolateByRevitIds
+    if (!window._peRevitDbIdCache || window._peRevitDbIdCache.size === 0) {
+        const instanceTree = modelRef.getInstanceTree();
+        if (!instanceTree) throw new Error('Instance tree not available');
+        const dbIdsToScan = [];
+        instanceTree.enumNodeChildren(instanceTree.getRootId(), function(dbId) { dbIdsToScan.push(dbId); }, true);
+        const cache = new Map();
+        await new Promise(function(resolve, reject) {
+            modelRef.getBulkProperties(dbIdsToScan, {}, function(results) {
+                results.forEach(function(result) {
+                    for (var i = 0; i < result.properties.length; i++) {
+                        var p = result.properties[i];
+                        var nl = (p.displayName || '').toLowerCase();
+                        if (nl.includes('elementid') || nl.includes('element id') || nl.includes('element_id')) {
+                            cache.set(String(p.displayValue), result.dbId);
+                            break;
+                        }
                     }
-                }
+                });
                 resolve();
             }, reject);
         });
+        window._peRevitDbIdCache = cache;
+        console.log('PE focus: built cache with', cache.size, 'entries');
     }
 
-    viewer.fitToView();
-    const compliantCount = totalElements - violations.length;
+    const cache    = window._peRevitDbIdCache;
+    const allDbIds   = [...new Set(allRevitIds.map(String))  ].map(id => cache.get(id)).filter(Boolean);
+    const focusDbIds = [...new Set(focusRevitIds.map(String))].map(id => cache.get(id)).filter(Boolean);
 
-    // ── Build results HTML ──
-    let html = '';
+    console.log('PE focus: allDbIds', allDbIds.length, 'focusDbIds', focusDbIds.length);
+    if (allDbIds.length === 0) { console.warn('No viewer objects matched for any row.'); return; }
 
-    // AEC DM distribution block (Step 1)
-    if (aecValueMap && aecValueMap.size > 0) {
-        html += `<div style="background:#e3f2fd;border-radius:4px;padding:8px;margin-bottom:8px;font-size:12px;">`;
-        html += `<div style="font-weight:bold;color:#1565c0;margin-bottom:4px;">📊 AEC DM — Value Distribution:</div>`;
-        const sorted = [...aecValueMap.entries()].sort((a, b) => b[1] - a[1]);
-        for (const [value, count] of sorted) {
-            const allowed = allowedValues.includes(value);
-            const color  = allowed ? '#2e7d32' : '#c62828';
-            const marker = allowed ? '✓' : '✗';
-            html += `<div style="color:${color};padding:2px 0;">${marker} <strong>${value}</strong>: ${count} elements</div>`;
-        }
-        html += `</div>`;
-    } else if (aecValueMap === null) {
-        html += `<div style="background:#fff8e1;border-radius:4px;padding:6px;margin-bottom:8px;font-size:11px;color:#795548;">ℹ️ AEC DM summary unavailable (file may not be Revit 2024+ or not yet indexed).</div>`;
+    viewer.clearThemingColors(modelRef);
+    viewer.isolate(allDbIds, modelRef);
+
+    const red  = new THREE.Vector4(1,    0.15, 0.1,  1);
+    const blue = new THREE.Vector4(0.06, 0.58, 0.85, 1);
+    const focusSet = new Set(focusDbIds);
+    allDbIds.forEach(function(dbId) {
+        viewer.setThemingColor(dbId, focusSet.has(dbId) ? blue : red, modelRef);
+    });
+
+    viewer.fitToView(focusDbIds.length > 0 ? focusDbIds : allDbIds, modelRef);
+    const btn = document.getElementById('viewerShowAllBtn');
+    if (btn) btn.style.display = '';
+}
+
+function _peEscapeHtml(s) {
+    return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
+// Look up a friendly type label from the shared paramTypeCache (populated by examples.js).
+// Cache stores Autodesk spec strings like "autodesk.parameter.aec:length-1.0.0"
+function _peParamTypeLabelForViewer(paramName) {
+    var typeCache = window._paramTypeCache || {};
+    for (var egId in typeCache) {
+        var t = (typeCache[egId] instanceof Map) ? typeCache[egId].get(paramName) : null;
+        if (!t) continue;
+        var s = t.toLowerCase();
+        var urnMatch = s.match(/:([a-z]+)/);
+        var typeName = urnMatch ? urnMatch[1] : s;
+        var map = {
+            'length':'Length','area':'Area','volume':'Volume','angle':'Angle',
+            'boolean':'Bool','yesno':'Yes/No','integer':'Int','int':'Int',
+            'number':'Number','double':'Number','real':'Number',
+            'text':'Text','multilinetext':'Text','string':'Text',
+            'url':'URL','material':'Material','force':'Force','mass':'Mass',
+            'currency':'Currency','energy':'Energy','speed':'Speed',
+            'time':'Time','temperature':'Temp'
+        };
+        return map[typeName] || (urnMatch ? typeName.charAt(0).toUpperCase() + typeName.slice(1) : null);
+    }
+    return null;
+}
+
+function applyParamChangesViaDA() {
+    const rows   = window._pendingParamEditRows || [];
+    const ctx    = window._pendingDAFileContext || {};
+    const session = sessionId;
+
+    // Collect rows that have a new value entered
+    const changes = [];
+    rows.forEach(function(row) {
+        var newVal = (row.newValue || '').trim();
+        if (!newVal || newVal === row.currentValue) return;
+        (row.revitIds || []).forEach(function(rid) {
+            changes.push({ elementId: String(rid), paramName: row.paramName, newValue: newVal });
+        });
+    });
+
+    if (changes.length === 0) {
+        alert('No new values entered. Edit the "New Value" cells first.');
+        return;
+    }
+    if (!ctx.fileVersionUrn) {
+        alert('File context missing — please re-open the viewer from the parameter explorer.');
+        return;
+    }
+    if (!session) {
+        alert('No active session. Please log in again.');
+        return;
     }
 
-    // Viewer scan summary (Step 2)
-    const bgColor = violations.length === 0 ? '#e8f5e9' : '#ffebee';
-    html += `<div style="background:${bgColor};border-radius:4px;padding:8px;font-size:12px;">`;
-    if (violations.length === 0) {
-        html += `<div style="color:#2e7d32;font-weight:bold;">✅ All ${totalElements} elements are compliant.</div>`;
+    // Log the full file context to console so the user can verify the correct file is selected
+    console.group('DA Submit — file context');
+    console.log('fileName:      ', ctx.fileName);
+    console.log('fileVersionUrn:', ctx.fileVersionUrn);
+    console.log('projectId:     ', ctx.projectId);
+    console.log('hubId:         ', ctx.hubId);
+    console.log('region:        ', ctx.region);
+    console.groupEnd();
+
+    _peShowDAProgress('Resolving file\u2026 (check browser Console for file URN details)', null);
+
+    // Resolve projectId lazily if not already known
+    var resolvePromise;
+    if (ctx.projectId) {
+        resolvePromise = Promise.resolve(ctx.projectId);
+    } else if (ctx.hubId) {
+        resolvePromise = fetch(
+            '/api/da/resolve-project?sessionId=' + encodeURIComponent(session)
+            + '&hubId=' + encodeURIComponent(ctx.hubId)
+            + '&fileVersionUrn=' + encodeURIComponent(ctx.fileVersionUrn)
+            + (ctx.region ? '&region=' + encodeURIComponent(ctx.region) : '')
+        )
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            if (d.error) throw new Error(d.error);
+            ctx.projectId = d.projectId;
+            return d.projectId;
+        });
     } else {
-        html += `<div style="color:#c62828;font-weight:bold;">⚠️ ${violations.length} of ${totalElements} non-compliant — highlighted in red.</div>`;
-        html += `<div style="color:#388e3c;margin-top:2px;">✓ ${compliantCount} compliant</div>`;
-    }
-    html += `</div>`;
-
-    if (resultsDiv) resultsDiv.innerHTML = html;
-}
-
-// Filter by multiple selected categories
-async function filterBySelectedCategories() {
-    const statusDiv = document.getElementById('filterStatus');
-    const elementListDiv = document.getElementById('elementList');
-    
-    // Get all checked checkboxes
-    const checkboxes = document.querySelectorAll('#categoryResults input[type="checkbox"]:checked');
-    const selectedCategories = Array.from(checkboxes).map(cb => cb.value);
-    
-    if (selectedCategories.length === 0) {
-        alert('Please select at least one category');
-        return;
-    }
-    
-    console.log('🔍 Filtering elements by categories using Forge Viewer (NO GraphQL):', selectedCategories.join(', '));
-    
-    const loadingMsg = selectedCategories.length === 1 
-        ? `🔍 Loading ${selectedCategories[0]} elements...`
-        : `🔍 Loading ${selectedCategories.length} categories...`;
-    if (statusDiv) statusDiv.innerHTML = `<div class="category-results info" style="margin-top: 10px;">${loadingMsg}</div>`;
-    if (elementListDiv) elementListDiv.innerHTML = '';
-    
-    try {
-        // Use Forge Viewer-only filtering (NO GraphQL!)
-        const result = await filterByCategoriesInViewer(selectedCategories);
-        
-        if (result.dbIds.length === 0) {
-            if (statusDiv) statusDiv.innerHTML = `<div class="category-results warning">No elements found for selected categories</div>`;
-            return;
-        }
-        
-        console.log(`✓ Found ${result.dbIds.length} element(s) using Forge Viewer`);
-        console.log(`✓ Retrieved properties for all elements`);
-        
-        // Isolation applied per-model inside filterByCategoriesInViewer
-        viewer.fitToView();
-        
-        // Store element data and create reverse mapping (for click events)
-        elementDataMap.clear();
-        filteredElementsMap.clear();
-        
-        result.elements.forEach(element => {
-            elementDataMap.set(element.dbId, element);
-            filteredElementsMap.set(element.dbId, element.dbId); // Simple mapping for viewer-only mode
-        });
-        
-        // Store for parameter query
-        currentFilteredCategories = selectedCategories;
-
-        // Show treemap button
-        if (elementListDiv) elementListDiv.innerHTML = `
-            <button onclick="showTreemapModal()"
-                style="width:100%;padding:8px;margin-top:4px;background:#7b1fa2;color:white;
-                       border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:bold;">
-                🌳 Show Treemap
-            </button>`;
-
-        const categoryList = selectedCategories.join(', ');
-        if (statusDiv) statusDiv.innerHTML = `
-            <div class="category-results success">✓ Showing ${result.dbIds.length} elements (${categoryList})</div>
-        `;
-        // Auto-fill compliance category when a single category is selected
-        const compCat = document.getElementById('compCategory');
-        if (compCat && selectedCategories.length === 1) compCat.value = selectedCategories[0];
-    } catch (error) {
-        console.error('Error filtering by categories:', error);
-        if (statusDiv) statusDiv.innerHTML = `<div class="category-results warning">Error: ${error.message}</div>`;
-    }
-}
-
-// ─── Hybrid workflow: query Revit parameters via AEC DM after Viewer filtering ─
-async function loadParametersFromAecDM() {
-    const statusDiv = document.getElementById('filterStatus');
-
-    if (!currentFilteredCategories || currentFilteredCategories.length === 0) {
-        alert('Please filter elements first');
+        alert('Cannot determine ACC project. Please re-run the query from the hub selector and try again.');
         return;
     }
 
-    if (statusDiv) statusDiv.innerHTML = `
-        <div class="category-results info">⏳ Querying AEC Data Model for parameters... (Revit 2024+ only)</div>
-    `;
-
-    try {
-        const elements = await queryElementParameters(currentFilteredCategories);
-
-        if (!elements) {
-            if (statusDiv) statusDiv.innerHTML = `
-                <div class="category-results warning">
-                    ⚠️ AEC DM lookup failed — file may not be Revit 2024+ or not yet indexed.
-                </div>
-                <button onclick="loadParametersFromAecDM()" style="margin-top:6px;width:100%;padding:7px;background:#ff9800;color:white;border:none;border-radius:4px;cursor:pointer;font-size:12px;font-weight:bold;">📊 Retry Load Parameters (AEC DM)</button>
-            `;
-            return;
-        }
-
-        console.log(`✓ Received ${elements.length} elements with full parameters from AEC DM`);
-        displayParameterResults(elements);
-
-        if (statusDiv) statusDiv.innerHTML = `
-            <div class="category-results success">✓ Loaded parameters for ${elements.length} elements from AEC DM</div>
-            <button onclick="loadParametersFromAecDM()" style="margin-top:6px;width:100%;padding:7px;background:#ff9800;color:white;border:none;border-radius:4px;cursor:pointer;font-size:12px;font-weight:bold;">📊 Reload Parameters (AEC DM)</button>
-        `;
-    } catch (error) {
-        console.error('Error loading parameters:', error);
-        if (statusDiv) statusDiv.innerHTML = `
-            <div class="category-results warning">Error: ${error.message}</div>
-            <button onclick="loadParametersFromAecDM()" style="margin-top:6px;width:100%;padding:7px;background:#ff9800;color:white;border:none;border-radius:4px;cursor:pointer;font-size:12px;font-weight:bold;">📊 Retry Load Parameters (AEC DM)</button>
-        `;
-    }
-}
-
-// Display parameter results from AEC DM in the element list panel
-function displayParameterResults(elements) {
-    const elementListDiv = document.getElementById('elementList');
-    if (!elementListDiv) return;
-
-    let html = `<div style="margin-top:10px;padding:10px;background:white;border-radius:4px;border:1px solid #ddd;">`;
-    html += `<div style="font-weight:bold;margin-bottom:8px;color:#333;">📊 ${elements.length} Elements with Full Parameters:</div>`;
-    html += `<div style="max-height:400px;overflow-y:auto;">`;
-
-    elements.forEach(element => {
-        const params = element.properties?.results || [];
-        const filled = params.filter(p => p.displayValue !== null && p.displayValue !== undefined && p.displayValue !== '');
-
-        // Group by collection name (Revit parameter group)
-        const groups = {};
-        filled.forEach(p => {
-            const group = p.definition?.collection?.name || 'Other';
-            if (!groups[group]) groups[group] = [];
-            groups[group].push(p);
+    resolvePromise
+    .then(function(projectId) {
+        ctx.projectId = projectId;
+        _peShowDAProgress('Submitting to Design Automation\u2026', null);
+        return fetch('/api/da/submit', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                sessionId:      session,
+                changes:        changes,
+                fileVersionUrn: ctx.fileVersionUrn,
+                projectId:      ctx.projectId,
+                hubId:          ctx.hubId || null,
+                revitEngine:    ctx.revitEngine || '',
+                fileName:       ctx.fileName || 'model.rvt'
+            })
         });
-        const sortedGroups = Object.keys(groups).sort();
-
-        html += `<div style="border:1px solid #e0e0e0;border-radius:4px;margin-bottom:6px;overflow:hidden;">`;
-        html += `<div style="background:#1976d2;color:white;padding:6px 10px;font-size:12px;font-weight:bold;cursor:pointer"
-                      onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'block':'none'">
-                    ${element.name || 'Unnamed'} <span style="float:right;font-weight:normal">${filled.length} params ▼</span>
-                 </div>`;
-        html += `<div style="display:none;padding:6px;">`;
-        sortedGroups.forEach(group => {
-            html += `<div style="font-size:10px;font-weight:bold;color:#1976d2;padding:4px 4px 2px;text-transform:uppercase;letter-spacing:0.5px;">${group}</div>`;
-            html += `<table style="width:100%;font-size:11px;border-collapse:collapse;margin-bottom:4px;">`;
-            groups[group].forEach(p => {
-                html += `<tr style="border-bottom:1px solid #f0f0f0;">
-                    <td style="padding:2px 6px;color:#555;width:50%">${p.name}</td>
-                    <td style="padding:2px 6px;color:#333;">${p.displayValue}</td>
-                </tr>`;
-            });
-            html += `</table>`;
-        });
-        html += `</div></div>`;
-    });
-
-    html += `</div></div>`;
-    elementListDiv.innerHTML = html;
-}
-
-// Filter by multiple categories using Forge Viewer only (NO GraphQL!)
-async function filterByCategoriesInViewer(categoryNames) {
-    if (!cachedCategoryDbIds) throw new Error('Category cache not available — open categories panel first');
-
-    const allModels = (viewer && viewer.getAllModels) ? viewer.getAllModels() : (viewer && viewer.model ? [viewer.model] : []);
-    console.log(`   Filtering ${categoryNames.length} categories using cache across ${allModels.length} model(s)...`);
-
-    // Build model → matching dbIds map from cache
-    const modelDbIds = new Map(); // model → dbIds[]
-    for (const catName of categoryNames) {
-        const entries = cachedCategoryDbIds.get(catName) || [];
-        for (const { model, dbIds } of entries) {
-            if (!modelDbIds.has(model)) modelDbIds.set(model, []);
-            modelDbIds.get(model).push(...dbIds);
+    })
+    .then(function(r) {
+        if (!r.ok && r.headers.get('content-type')?.includes('text/html')) {
+            throw new Error('Server returned HTTP ' + r.status + '. The server may need to be restarted for the new DA routes to take effect.');
         }
-    }
-
-    // Apply isolation per model
-    for (const model of allModels) {
-        const dbIds = modelDbIds.get(model) || [];
-        if (dbIds.length > 0) {
-            viewer.isolate(dbIds, model);
-        } else {
-            const tree = model.getInstanceTree();
-            if (tree) viewer.hide(tree.getRootId(), model);
-        }
-    }
-
-    const allDbIds = [...modelDbIds.values()].flat();
-    console.log(`   ✓ Found ${allDbIds.length} matching elements across all models (from cache)`);
-    return { dbIds: allDbIds, elements: [], perModel: [...modelDbIds.entries()].map(([model, dbIds]) => ({ model, dbIds, elements: [] })) };
-}
-
-// Display element list in the sidebar
-function displayElementList(elements, selectedCategories) {
-    const elementListDiv = document.getElementById('elementList');
-    if (!elementListDiv) return;
-    
-    let html = '<div style="margin-top: 10px; padding: 10px; background: white; border-radius: 4px; border: 1px solid #ddd;">';
-    html += `<div style="font-weight: bold; margin-bottom: 8px; color: #333;">📋 ${elements.length} Elements:</div>`;
-    html += '<div style="max-height: 200px; overflow-y: auto;">';
-    
-    elements.forEach((element, idx) => {
-        const categoryProp = element.properties.results.find(p => p.name === 'Category');
-        const categoryName = categoryProp ? categoryProp.value.replace(/^Revit\s+/i, '') : 'Unknown';
-        
-        html += `<div style="padding: 6px; border-bottom: 1px solid #eee; cursor: pointer; font-size: 12px;" 
-                      onmouseover="this.style.background='#f0f0f0'" 
-                      onmouseout="this.style.background='white'"
-                      onclick="highlightElementInViewer(${element.dbId})">`;
-        html += `<strong>${element.name || 'Unnamed'}</strong>`;
-        html += `<br><span style="color: #666; font-size: 11px;">${categoryName}</span>`;
-        html += `</div>`;
-    });
-    
-    html += '</div></div>';
-    elementListDiv.innerHTML = html;
-}
-
-// Clear category filter and show all elements
-async function clearCategoryFilter() {
-    // Uncheck all checkboxes
-    const checkboxes = document.querySelectorAll('#categoryResults input[type="checkbox"]');
-    checkboxes.forEach(cb => cb.checked = false);
-    
-    // Clear element mappings
-    filteredElementsMap.clear();
-    elementDataMap.clear();
-    
-    // Show all elements across all loaded models
-    if (viewer) {
-        viewer.showAll();
-        viewer.clearThemingColors();
-        viewer.fitToView();
-    }
-    
-    // Clear element list and status
-    const elementListDiv = document.getElementById('elementList');
-    const statusDiv = document.getElementById('filterStatus');
-    if (elementListDiv) elementListDiv.innerHTML = '';
-    if (statusDiv) statusDiv.innerHTML = '';
-    
-    // Close properties panel
-    closePropertiesPanel();
-    
-    console.log('✓ Category filter cleared');
-}
-
-// Generic function to fetch elements by any property filter
-async function getElementsByCategoryFilter(elementGroupId, propertyFilter) {
-    console.log('📋 Fetching elements with filter from AEC Data Model API');
-    console.log('   Element Group ID:', elementGroupId);
-    console.log('   Filter:', propertyFilter);
-    console.log('   Region:', currentRegion);
-
-    const query = `
-        query GetElementsFromCategory($elementGroupId: ID!, $propertyFilter: String!, $cursor: String, $limit: Int) {
-            elementsByElementGroup(elementGroupId: $elementGroupId, filter: {query: $propertyFilter}, pagination: {cursor: $cursor, limit: $limit}) {
-                pagination {
-                    cursor
-                }
-                results {
-                    id
-                    name
-                    properties {
-                        results {
-                            name
-                            value
-                            definition {
-                                units {
-                                    name
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    `;
-
-    let allElements = [];
-    const pageSize = 100;
-    const concurrentRequests = 5; // Fetch 5 pages in parallel
-    
-    // Helper function to fetch a single page
-    const fetchPage = async (cursor) => {
-        const variables = {
-            elementGroupId: elementGroupId,
-            propertyFilter: propertyFilter,
-            limit: pageSize
-        };
-        
-        if (cursor) {
-            variables.cursor = cursor;
-        }
-
-        const data = await graphqlRequest(query, variables, currentRegion);
-
-        if (data.errors) {
-            console.error('GraphQL errors:', data.errors);
-            throw new Error(data.errors[0].message || 'GraphQL query failed');
-        }
-
-        if (!data.data || !data.data.elementsByElementGroup) {
-            return { results: [], cursor: null };
-        }
-
-        return {
-            results: data.data.elementsByElementGroup.results || [],
-            cursor: data.data.elementsByElementGroup.pagination?.cursor
-        };
-    };
-
-    // Fetch first page to get initial cursor
-    console.log(`   Starting parallel pagination (${concurrentRequests} concurrent requests, ${pageSize} elements/page)...`);
-    const firstPage = await fetchPage(null);
-    allElements = firstPage.results;
-    console.log(`   ✓ Page 1: ${firstPage.results.length} elements`);
-
-    // Collect all cursors for parallel fetching
-    let cursors = firstPage.cursor ? [firstPage.cursor] : [];
-    let batchNum = 1;
-
-    while (cursors.length > 0) {
-        // Take up to concurrentRequests cursors
-        const batchCursors = cursors.splice(0, concurrentRequests);
-        
-        console.log(`   📦 Batch ${batchNum}: Fetching ${batchCursors.length} pages in parallel...`);
-        
-        // Fetch all pages in this batch concurrently
-        const batchPromises = batchCursors.map(cursor => fetchPage(cursor));
-        const batchResults = await Promise.all(batchPromises);
-        
-        // Collect results and new cursors
-        let batchElementCount = 0;
-        batchResults.forEach(pageData => {
-            allElements = allElements.concat(pageData.results);
-            batchElementCount += pageData.results.length;
-            if (pageData.cursor) {
-                cursors.push(pageData.cursor);
-            }
-        });
-        
-        console.log(`   ✓ Batch ${batchNum}: ${batchElementCount} elements (total: ${allElements.length})`);
-        batchNum++;
-    }
-
-    console.log(`✓ Retrieved ${allElements.length} element(s) using parallel pagination`);
-
-    // Filter to only include viewable elements (those with External IDs in the viewer)
-    const viewableElements = filterViewableElements(allElements);
-    
-    return viewableElements;
-}
-
-// Legacy single-category filter function (kept for backwards compatibility)
-async function filterByCategory() {
-    const input = document.getElementById('categoryInput');
-    const resultsDiv = document.getElementById('categoryResults');
-    const categoryName = input?.value?.trim();
-
-    if (!categoryName) {
-        resultsDiv.innerHTML = '<div class="category-results warning">Please enter a category name</div>';
-        return;
-    }
-
-    if (!currentElementGroup) {
-        resultsDiv.innerHTML = '<div class="category-results warning">No element group selected</div>';
-        return;
-    }
-
-    if (!sessionId) {
-        resultsDiv.innerHTML = '<div class="category-results warning">Not logged in</div>';
-        return;
-    }
-
-    resultsDiv.innerHTML = '<div class="category-results info">Querying AEC Data Model for "' + categoryName + '"...</div>';
-
-    try {
-        console.log('🔍 Filtering elements by category:', categoryName);
-        console.log('   Element Group ID:', currentElementGroup.id);
-        console.log('   Filter:', `property.name."Revit Category Type Id"==${categoryName}`);
-
-        const elements = await getElementsByCategory(currentElementGroup.id, categoryName);
-        
-        if (elements.length > 0) {
-            console.log(`✓ Found ${elements.length} element(s) from AEC Data Model API`);
-            
-            // Isolate elements in viewer
-            if (viewer && viewer.model) {
-                resultsDiv.innerHTML = '<div class="category-results info">Mapping elements to viewer...</div>';
-                const dbIds = await mapElementsToViewerDbIds(elements);
-                
-                if (dbIds.length > 0) {
-                    console.log(`✓ Mapped ${dbIds.length} element(s) to viewer dbIds`);
-                    
-                    viewer.isolate(dbIds);
-                    viewer.fitToView(dbIds);
-                    
-                    // Build element-to-dbId mapping for interactive highlighting
-                    // We need to map based on External ID to ensure correct pairing
-                    filteredElementsMap.clear();
-                    elementDataMap.clear();
-                    
-                    // Get the external ID mapping from viewer (async callback)
-                    viewer.model.getExternalIdMapping((externalIdMapping) => {
-                        // Build the mapping
-                        elements.forEach(element => {
-                            // Extract External ID from element properties
-                            if (element.properties?.results) {
-                                const externalIdProp = element.properties.results.find(p => p.name === 'External ID');
-                                if (externalIdProp && externalIdProp.value) {
-                                    const dbId = externalIdMapping[externalIdProp.value];
-                                    if (dbId) {
-                                        filteredElementsMap.set(element.id, dbId);
-                                        elementDataMap.set(dbId, element); // Store full element data by dbId
-                                    }
-                                }
-                            }
-                        });
-                        console.log(`✓ Created mapping for ${filteredElementsMap.size} elements`);
-                        
-                        // Now build and display the HTML list (inside callback so mapping is complete)
-                        let resultsHtml = `<div class="category-results success">✓ Found and isolated ${dbIds.length} element(s) with category "${categoryName}"</div>`;
-                        resultsHtml += '<div class="category-results-hint" style="padding: 8px; background: #e3f2fd; color: #1976d2; font-size: 12px; margin-top: 5px; border-radius: 4px;">💡 Click elements in viewer or list for bidirectional highlighting</div>';
-                        resultsHtml += '<div id="elementsListContainer" style="max-height: 300px; overflow-y: auto; margin-top: 10px;">';
-                        
-                        elements.slice(0, Math.min(50, elements.length)).forEach((element, index) => {
-                            const dbId = filteredElementsMap.get(element.id);
-                            if (dbId) {
-                                resultsHtml += `<div class="element-list-item" data-dbid="${dbId}" onclick="highlightElementInViewer(${dbId})" style="padding: 8px; border-bottom: 1px solid #eee; font-size: 13px; cursor: pointer; transition: background 0.2s;" onmouseover="this.style.background='#f5f5f5'" onmouseout="this.style.background='white'">`;
-                                resultsHtml += `<strong>${index + 1}. ${element.name || 'Unnamed'}</strong><br/>`;
-                                resultsHtml += `<span style="color: #666; font-size: 11px;">ID: ${element.id}</span>`;
-                                resultsHtml += `</div>`;
-                            }
-                        });
-                        
-                        if (elements.length > 50) {
-                            resultsHtml += `<div style="padding: 8px; color: #666; font-size: 12px; text-align: center;">... and ${elements.length - 50} more</div>`;
-                        }
-                        
-                        resultsHtml += '</div>';
-                        resultsDiv.innerHTML = resultsHtml;
-                        
-                        // Setup bidirectional interaction: clicking in viewer highlights in sidebar
-                        setupViewerToSidebarSync();
-                    });
-                } else {
-                    console.warn('⚠ Could not map AEC elements to viewer dbIds');
-                    let resultsHtml = `<div class="category-results warning">Found ${elements.length} element(s) in AEC Data Model, but could not map them to the viewer</div>`;
-                    resultsDiv.innerHTML = resultsHtml;
-                }
-            } else {
-                // Viewer not loaded, just show results
-                let resultsHtml = `<div class="category-results success">✓ Found ${elements.length} element(s) with category "${categoryName}"</div>`;
-                resultsHtml += '<div style="max-height: 300px; overflow-y: auto; margin-top: 10px;">';
-                
-                elements.forEach((element, index) => {
-                    resultsHtml += `<div style="padding: 8px; border-bottom: 1px solid #eee; font-size: 13px;">`;
-                    resultsHtml += `<strong>${index + 1}. ${element.name || 'Unnamed'}</strong><br/>`;
-                    resultsHtml += `<span style="color: #666; font-size: 11px;">ID: ${element.id}</span>`;
-                    resultsHtml += `</div>`;
-                });
-                
-                resultsHtml += '</div>';
-                resultsDiv.innerHTML = resultsHtml;
-            }
-        } else {
-            resultsDiv.innerHTML = '<div class="category-results warning">No elements found with category "' + categoryName + '"<br/>Try: Walls, Doors, Windows, Floors, Roofs, etc.</div>';
-        }
-    } catch (error) {
-        console.error('Error filtering by category:', error);
-        resultsDiv.innerHTML = '<div class="category-results warning">Error: ' + error.message + '</div>';
-    }
-}
-
-
-
-async function mapElementsToViewerDbIds(elements) {
-    console.log('🔗 Mapping AEC Data Model elements to viewer dbIds...');
-    
-    if (!viewer || !viewer.model) {
-        console.warn('Viewer or model not available');
-        return [];
-    }
-
-    console.log(`   Processing ${elements.length} AEC elements`);
-
-    // Step 1: Extract "External ID" property from AEC elements
-    // This is the Revit UniqueId that's persistent across Revit, Viewer, and AEC Data Model
-    const externalIds = [];
-    
-    elements.forEach(elem => {
-        if (elem.properties?.results) {
-            const externalIdProp = elem.properties.results.find(p => p.name === 'External ID');
-            if (externalIdProp && externalIdProp.value) {
-                externalIds.push(externalIdProp.value);
-            }
-        }
-    });
-
-    console.log(`   Extracted ${externalIds.length} External IDs from AEC elements`);
-    if (externalIds.length > 0) {
-        console.log(`   Sample External IDs: ${externalIds.slice(0, 3).join(', ')}`);
-    }
-
-    // Step 2: Use getExternalIdMapping to get the externalId->dbId dictionary
-    return new Promise((resolve) => {
-        viewer.model.getExternalIdMapping((externalIdMapping) => {
-            console.log(`   Viewer has ${Object.keys(externalIdMapping).length} objects with external IDs`);
-            
-            // Log sample viewer external IDs for comparison
-            const sampleViewerIds = Object.keys(externalIdMapping).slice(0, 3);
-            console.log(`   Sample Viewer External IDs: ${sampleViewerIds.join(', ')}`);
-            
-            // Step 3: Look up each AEC External ID in the viewer mapping
-            const matchedDbIds = [];
-            externalIds.forEach(externalId => {
-                const dbId = externalIdMapping[externalId];
-                if (dbId) {
-                    matchedDbIds.push(dbId);
-                }
-            });
-
-            console.log(`✓ Mapping complete: ${matchedDbIds.length}/${externalIds.length} elements matched`);
-            
-            if (matchedDbIds.length === 0 && externalIds.length > 0) {
-                console.warn('⚠ No matches found between AEC External IDs and Viewer external IDs');
-                console.warn('   This might indicate:');
-                console.warn('   - Different model versions between AEC Data Model and Viewer');
-                console.warn('   - Model loaded in Viewer is not the same as queried element group');
-            }
-
-            resolve(matchedDbIds);
-        }, (error) => {
-            console.error('Error getting external ID mapping:', error);
-            resolve([]);
-        });
+        return r.json();
+    })
+    .then(function(data) {
+        if (data.error) throw new Error(data.error);
+        _peShowDAProgress('WorkItem queued \u2014 waiting for Revit engine\u2026', null);
+        _pePollWorkItem(data.workItemId, data, 0);
+    })
+    .catch(function(err) {
+        _peShowDAProgress(null, 'Submission failed: ' + err.message);
     });
 }
 
-async function getElementsByCategory(elementGroupId, categoryName) {
-    console.log('📋 Fetching elements by category from AEC Data Model API');
-    console.log('   Element Group ID:', elementGroupId);
-    console.log('   Category:', categoryName);
-    console.log('   Region:', currentRegion);
-
-    const query = `
-        query GetElementsFromCategory($elementGroupId: ID!, $propertyFilter: String!) {
-            elementsByElementGroup(elementGroupId: $elementGroupId, filter: {query: $propertyFilter}) {
-                pagination {
-                    cursor
-                }
-                results {
-                    id
-                    name
-                    properties {
-                        results {
-                            name
-                            value
-                            definition {
-                                units {
-                                    name
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    `;
-
-    const categoryPropertyId = 'autodesk.revit.parameter:parameter.category-2.0.0';
-    const variables = {
-        elementGroupId: elementGroupId,
-        propertyFilter: `property.id.${categoryPropertyId}==${categoryName}`
-    };
-
-    console.log('   Variables:', JSON.stringify(variables, null, 2));
-
-    const data = await graphqlRequest(query, variables, currentRegion);
-
-    if (data.errors) {
-        console.error('GraphQL errors:', data.errors);
-        throw new Error(data.errors[0].message || 'GraphQL query failed');
-    }
-
-    if (!data.data || !data.data.elementsByElementGroup) {
-        console.error('No data returned from elementsByElementGroup query');
-        return [];
-    }
-
-    const elements = data.data.elementsByElementGroup.results || [];
-    console.log(`✓ Retrieved ${elements.length} element(s)`);
-
-    // Filter to only include viewable elements
-    const viewableElements = filterViewableElements(elements);
-    
-    return viewableElements;
-}
-
-// Test function for multi-category filter syntax
-async function testMultiCategoryFilters(elementGroupId, categories) {
-    console.log('🧪 Testing multi-category filter syntaxes...');
-    console.log(`   Categories to test: ${categories.join(', ')}`);
-    
-    const categoryPropertyId = 'autodesk.revit.parameter:parameter.category-2.0.0';
-    const testSyntaxes = [
-        {
-            name: '✅ Official RSQL: OR with lowercase',
-            filter: categories.map(c => `property.id.${categoryPropertyId}==${c}`).join(' or ')
-        },
-        {
-            name: '✅ Official RSQL: OR with parentheses',
-            filter: `(${categories.map(c => `property.id.${categoryPropertyId}==${c}`).join(' or ')})`
-        },
-        {
-            name: 'RSQL: OR with uppercase',
-            filter: categories.map(c => `property.id.${categoryPropertyId}==${c}`).join(' OR ')
-        },
-        {
-            name: 'Double pipe OR (||)',
-            filter: `property.id.${categoryPropertyId}==${categories.join('||')}`
-        },
-        {
-            name: 'Comma-separated values',
-            filter: `property.id.${categoryPropertyId}==${categories.join(',')}`
-        },
-        {
-            name: 'IN operator with brackets',
-            filter: `property.id.${categoryPropertyId} IN [${categories.join(',')}]`
-        },
-        {
-            name: 'Single pipe OR (|)',
-            filter: `property.id.${categoryPropertyId}==${categories.join('|')}`
-        }
-    ];
-
-    const query = `
-        query GetElementsFromCategory($elementGroupId: ID!, $propertyFilter: String!) {
-            elementsByElementGroup(elementGroupId: $elementGroupId, filter: {query: $propertyFilter}) {
-                pagination {
-                    cursor
-                }
-                results {
-                    id
-                    name
-                }
-            }
-        }
-    `;
-
-    console.log('\n' + '='.repeat(80));
-    
-    for (let i = 0; i < testSyntaxes.length; i++) {
-        const test = testSyntaxes[i];
-        console.log(`\nTest ${i + 1}/${testSyntaxes.length}: ${test.name}`);
-        console.log(`Filter: ${test.filter}`);
-        
-        try {
-            const variables = {
-                elementGroupId: elementGroupId,
-                propertyFilter: test.filter
-            };
-            
-            const data = await graphqlRequest(query, variables, currentRegion);
-            
-            if (data.errors) {
-                console.log(`❌ ERROR: ${JSON.stringify(data.errors[0].message)}`);
-            } else if (data.data?.elementsByElementGroup?.results) {
-                const count = data.data.elementsByElementGroup.results.length;
-                console.log(`✅ SUCCESS: ${count} elements found`);
-                if (count > 0) {
-                    console.log(`   Sample elements: ${data.data.elementsByElementGroup.results.slice(0, 3).map(e => e.name).join(', ')}`);
-                }
-            } else {
-                console.log(`⚠️ No data returned`);
-            }
-        } catch (error) {
-            console.log(`❌ EXCEPTION: ${error.message}`);
-        }
-        
-        // Small delay between tests to avoid rate limiting
-        await new Promise(resolve => setTimeout(resolve, 200));
-    }
-    
-    console.log('\n' + '='.repeat(80));
-    console.log('🧪 Multi-category filter syntax testing complete!');
-}
-
-// Button handler for running multi-category tests
-async function runMultiCategoryTest() {
-    const resultsDiv = document.getElementById('categoryResults');
-    
-    if (!currentElementGroup) {
-        resultsDiv.innerHTML = '<div class="category-results warning">No element group loaded</div>';
-        return;
-    }
-    
-    if (!sessionId) {
-        resultsDiv.innerHTML = '<div class="category-results warning">Not logged in</div>';
-        return;
-    }
-    
-    resultsDiv.innerHTML = '<div class="category-results info">🧪 Running multi-category syntax tests...<br/>Check browser console for detailed results.</div>';
-    
-    // Test with common Revit categories
-    const testCategories = ['Walls', 'Doors'];
-    
-    console.log('\n' + '█'.repeat(80));
-    console.log('🧪 MULTI-CATEGORY FILTER SYNTAX TEST');
-    console.log('   Testing categories: ' + testCategories.join(' + '));
-    console.log('   Element Group: ' + currentElementGroup.name);
-    console.log('█'.repeat(80));
-    
-    await testMultiCategoryFilters(currentElementGroup.id, testCategories);
-    
-    resultsDiv.innerHTML = '<div class="category-results success">✓ Test complete! Check browser console for results.<br/><br/>Look for syntax that shows "✅ SUCCESS" with multiple elements found.</div>';
-}
-
-// Get sample elements to discover available property names
-async function discoverPropertyNames(elementGroupId, maxSamples = 5) {
-    console.log('🔍 Fetching sample elements to discover property names...');
-    
-    const query = `
-        query GetSampleElements($elementGroupId: ID!) {
-            elementsByElementGroup(elementGroupId: $elementGroupId) {
-                results {
-                    id
-                    name
-                    properties {
-                        results {
-                            name
-                            value
-                        }
-                    }
-                }
-            }
-        }
-    `;
-
-    try {
-        const variables = { elementGroupId };
-        const data = await graphqlRequest(query, variables, currentRegion);
-        
-        if (data.errors) {
-            console.error('GraphQL errors:', data.errors);
-            return new Set();
-        }
-        
-        const elements = data.data?.elementsByElementGroup?.results || [];
-        const propertyNames = new Set();
-        const propertyExamples = {}; // Store sample values for each property
-        
-        // Collect all unique property names from sample elements
-        elements.slice(0, maxSamples).forEach(element => {
-            if (element.properties?.results) {
-                element.properties.results.forEach(prop => {
-                    propertyNames.add(prop.name);
-                    
-                    // Store first 3 example values for each property
-                    if (!propertyExamples[prop.name]) {
-                        propertyExamples[prop.name] = [];
-                    }
-                    if (propertyExamples[prop.name].length < 3) {
-                        propertyExamples[prop.name].push(prop.value);
-                    }
-                });
-            }
-        });
-        
-        console.log(`✓ Found ${propertyNames.size} unique property names in ${Math.min(maxSamples, elements.length)} sample elements:`);
-        Array.from(propertyNames).sort().forEach(name => {
-            console.log(`   - ${name}`);
-        });
-        
-        // Log sample values for key properties
-        console.log('\n📋 Sample values for key properties:');
-        const keyProperties = ['Family Name', 'Revit Category Type Id', 'Element Name', 'Revit Element ID'];
-        keyProperties.forEach(propName => {
-            if (propertyExamples[propName]) {
-                console.log(`   ${propName}:`);
-                propertyExamples[propName].forEach((value, idx) => {
-                    console.log(`      [${idx + 1}] ${value}`);
-                });
-            }
-        });
-        
-        return propertyNames;
-    } catch (error) {
-        console.error('Error discovering property names:', error);
-        return new Set();
-    }
-}
-
-// Discover available categories in the current element group
-async function discoverCategories(elementGroupId) {
-    console.log('🔍 Discovering available categories in element group...');
-    
-    // Use "Revit Category Type Id" property which contains category names
-    const categoryPropertyName = "Revit Category Type Id";
-    console.log(`✓ Using property: "${categoryPropertyName}"`);
-    
-    const query = `
-        query GetDistinctCategoryValues($elementGroupId: ID!, $name: String!) {
-            distinctPropertyValuesInElementGroupByName(
-                elementGroupId: $elementGroupId,
-                name: $name
-            ) {
-                results {
-                    definition {
-                        id
-                    }
-                    values {
-                        value
-                        count
-                    }
-                }
-            }
-        }
-    `;
-
-    try {
-        const variables = { 
-            elementGroupId: elementGroupId,
-            name: categoryPropertyName
-        };
-        
-        const data = await graphqlRequest(query, variables, currentRegion);
-        
-        if (data.errors) {
-            console.error('GraphQL errors:', data.errors);
-            return [];
-        }
-        
-        if (!data.data?.distinctPropertyValuesInElementGroupByName?.results) {
-            console.warn('No category data returned');
-            return [];
-        }
-        
-        // Extract categories from the nested structure
-        const results = data.data.distinctPropertyValuesInElementGroupByName.results;
-        const categories = [];
-        
-        results.forEach(result => {
-            if (result.values) {
-                result.values.forEach(valueObj => {
-                    categories.push({
-                        value: valueObj.value,
-                        count: valueObj.count
-                    });
-                });
-            }
-        });
-        
-        console.log(`✓ Found ${categories.length} categories:`);
-        categories.forEach(cat => {
-            console.log(`   - ${cat.value} (${cat.count} elements)`);
-        });
-        
-        return categories;
-    } catch (error) {
-        console.error('Error discovering categories:', error);
-        return [];
-    }
-}
-
-// Button handler for discovering available categories
-async function showAvailableCategories() {
-    const resultsDiv = document.getElementById('categoryResults');
-    
-    if (!currentElementGroup) {
-        resultsDiv.innerHTML = '<div class="category-results warning">No element group loaded</div>';
-        return;
-    }
-    
-    resultsDiv.innerHTML = '<div class="category-results info">🔍 Discovering available categories...</div>';
-    
-    try {
-        // Get categories directly from the viewer model (faster and only shows viewable elements!)
-        const categories = await getCategoriesFromViewer();
-        
-        if (categories.length > 0) {
-            let html = `<div class="category-results success" style="margin-bottom: 10px;">✓ Found ${categories.length} Viewable Categories:</div>`;
-            html += '<div style="margin-bottom: 10px; padding: 5px; border: 1px solid #ddd; border-radius: 4px; background: white;">';
-            
-            categories.forEach((cat, idx) => {
-                html += `<div style="padding: 6px 8px; border-bottom: 1px solid #eee; display: flex; align-items: center;">`;
-                html += `<input type="checkbox" id="cat_${idx}" value="${cat.value}" style="margin-right: 8px; cursor: pointer;" onchange="triggerCategoryFilter()">`;
-                html += `<label for="cat_${idx}" style="cursor: pointer; flex: 1; color: #333;">`;
-                html += `<strong>${cat.value}</strong> <span style="color: #666; font-size: 12px;">(${cat.count})</span>`;
-                html += `</label>`;
-                html += `</div>`;
-            });
-            
-            html += '</div>';
-            html += '<div id="filterStatus" style="margin-top: 10px;"></div>';
-            resultsDiv.innerHTML = html;
-        } else {
-            resultsDiv.innerHTML = '<div class="category-results warning">No categories found</div>';
-        }
-
-        // Auto-isolate pending category (triggered from treemap "Show in Viewer")
-        if (pendingCategoryHighlight && cachedCategoryDbIds) {
-            const catName = pendingCategoryHighlight;
-            pendingCategoryHighlight = null;
-            const entries = cachedCategoryDbIds.get(catName);
-            if (entries && entries.length > 0) {
-                console.log(`🎯 Auto-isolating category "${catName}" from treemap selection`);
-                for (const { model, dbIds } of entries) {
-                    viewer.isolate(dbIds, model);
-                }
-                viewer.fitToView(entries[0].dbIds, entries[0].model);
-                setTimeout(() => {
-                    const checkboxes = document.querySelectorAll('#categoryResults input[type="checkbox"]');
-                    checkboxes.forEach(cb => { if (cb.value === catName) cb.checked = true; });
-                }, 300);
-
-                // Apply compliance coloring if triggered from compliance treemap
-                if (pendingComplianceHighlight) {
-                    const { paramName, allowedValues } = pendingComplianceHighlight;
-                    pendingComplianceHighlight = null;
-                    applyComplianceColoring(entries, paramName, allowedValues);
-                }
-            } else {
-                console.warn(`⚠ Category "${catName}" not found in viewer model(s)`);
-                pendingComplianceHighlight = null;
-            }
-        }
-
-        // Auto-isolate specific elements (triggered from zoom-view "Show in Viewer")
-        if (pendingRevitElementIds && pendingRevitElementIds.length > 0) {
-            const ids = pendingRevitElementIds;
-            const cat = pendingRevitCategory;
-            pendingRevitElementIds = null;
-            pendingRevitCategory = null;
-            isolateByRevitIds(ids, cat).catch(e => console.warn('Auto-isolate by Revit ID failed:', e.message));
-        }
-    } catch (error) {
-        console.error('Error getting categories from viewer:', error);
-        resultsDiv.innerHTML = '<div class="category-results error">Failed to load categories</div>';
-    }
-}
-
-// ─── Compliance coloring: green = compliant, red = non-compliant ──────────────
-function applyComplianceColoring(entries, paramName, allowedValues) {
-    viewer.clearThemingColors();
-    const GREEN = new THREE.Vector4(0, 0.75, 0.25, 1);
-    const RED   = new THREE.Vector4(1, 0.18, 0.18, 1);
-
-    let compliant = 0, nonCompliant = 0;
-
-    for (const { model, dbIds } of entries) {
-        model.getBulkProperties(dbIds, {}, (results) => {
-            for (const elem of results) {
-                const prop = elem.properties?.find(p =>
-                    p.attributeName === paramName ||
-                    p.displayName === paramName ||
-                    p.attributeName === paramName.replace(/_/g, ' ') ||
-                    p.displayName === paramName.replace(/_/g, ' ') ||
-                    p.attributeName === paramName.replace(/ /g, '_') ||
-                    p.displayName === paramName.replace(/ /g, '_')
+function _pePollWorkItem(workItemId, submitData, attempt) {
+    var session = sessionId;
+    fetch('/api/da/workitem/' + workItemId + '?sessionId=' + encodeURIComponent(session))
+        .then(function(r) { return r.json(); })
+        .then(function(wi) {
+            if (wi.error) throw new Error(wi.error);
+            var status = wi.status; // pending | inprogress | success | failed | cancelled
+            if (status === 'pending' || status === 'inprogress') {
+                var elapsed = attempt * 6;
+                _peShowDAProgress(
+                    'Revit engine: ' + status + ' (' + elapsed + 's elapsed)\u2026',
+                    null
                 );
-                const val = prop ? String(prop.displayValue ?? '').trim() : '';
-                const ok = val !== '' && allowedValues.includes(val);
-                viewer.setThemingColor(elem.dbId, ok ? GREEN : RED, model);
-                if (ok) compliant++; else nonCompliant++;
+                setTimeout(function() { _pePollWorkItem(workItemId, submitData, attempt + 1); }, 6000);
+            } else if (status === 'success') {
+                // After DA completes (SaveCloudModel or SynchronizeWithCentral), call C4RModelPublish
+                // to create an explicit published version visible in ACC.
+                // Legacy download/upload path: finalize by creating a DM version from the OSS object.
+                if (submitData.storageObjectId) {
+                    _peShowDAProgress('Revit processing complete \u2014 creating new file version in ACC\u2026', null);
+                    _peFinalizeDAResult(submitData, wi);
+                } else if (submitData.itemId) {
+                    _peShowDAProgress('Revit processing complete \u2014 publishing new version to ACC\u2026', null);
+                    _pePublishDAResult(submitData, wi);
+                } else {
+                    _peShowDAProgress('Done! Parameters updated in Revit model.', null, null, 'success');
+                }
+            } else {
+                // failed or cancelled — show link to report
+                var msg = 'WorkItem ' + status + '.';
+                if (wi.reportUrl) msg += '\n\nView report: ' + wi.reportUrl;
+                _peShowDAProgress(null, msg, wi.reportUrl);
             }
-            console.log(`✅ Compliance coloring: ${compliant} green, ${nonCompliant} red`);
-        }, (err) => { console.warn('Compliance getBulkProperties error:', err); });
+        })
+        .catch(function(err) {
+            _peShowDAProgress(null, 'Poll error: ' + err.message);
+        });
+}
+
+function _peFinalizeDAResult(submitData, wi) {
+    var session = sessionId;
+    fetch('/api/da/finalize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            sessionId:       session,
+            projectId:       submitData.projectId,
+            itemId:          submitData.itemId,
+            storageObjectId: submitData.storageObjectId,
+            fileName:        submitData.fileName,
+            versionExtType:  submitData.versionExtType,
+            versionExtData:  submitData.versionExtData,
+            uploadKey:       submitData.uploadKey,
+            outBucket:       submitData.outBucket,
+            outObjKey:       submitData.outObjKey
+        })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (data.error) throw new Error(data.error);
+        if (data.newItem) {
+            _peShowDAProgress(
+                'Done! Parameters updated \u2014 saved as new file \u201c' + (data.name || 'updated file') + '\u201d in ACC.',
+                null, null, data.versionId || 'finalized'
+            );
+        } else {
+            _peShowDAProgress(
+                'Done! Parameters updated \u2014 new version V' + (data.versionNumber || '?') + ' created in ACC.',
+                null, null, data.versionId || 'finalized'
+            );
+        }
+    })
+    .catch(function(err) {
+        _peShowDAProgress(null, 'Finalize failed: ' + err.message);
+    });
+}
+
+function _pePublishDAResult(submitData, wi) {
+    var session = sessionId;
+    fetch('/api/da/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            sessionId: session,
+            projectId: submitData.projectId,
+            itemId:    submitData.itemId
+        })
+    })
+    .then(function(r) {
+        // Capture HTTP status before consuming body
+        var httpStatus = r.status;
+        return r.json().then(function(data) { return { httpStatus: httpStatus, data: data }; });
+    })
+    .then(function(result) {
+        var data = result.data;
+        if (result.httpStatus === 403 || (data.error && result.httpStatus === 403)) {
+            // 403 means no publish permission — but parameters were already updated by the workitem.
+            // Treat as a non-fatal warning and show success with the actual API error detail.
+            var apiDetail = data.error || data.detail || '';
+            var noteMsg = 'Parameters updated in Revit model.\n\n'
+                + '(Note: Could not publish a new ACC version.\n'
+                + 'API error: ' + (apiDetail || 'no detail returned') + ')';
+            _peShowDAProgress(noteMsg, null, null, 'updated');
+            return;
+        }
+        if (data.error) throw new Error(data.error);
+        _peShowDAProgress('Done! New version published to ACC.', null, null, data.commandId || 'published');
+    })
+    .catch(function(err) {
+        _peShowDAProgress(null, 'Publish failed: ' + err.message);
+    });
+}
+
+function _peShowDAProgress(message, errorMsg, reportUrl, successUrn) {
+    var overlay = document.getElementById('peDAOverlay');
+    if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.id = 'peDAOverlay';
+        overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(10,19,28,0.72);z-index:9999;display:flex;align-items:center;justify-content:center;';
+        document.body.appendChild(overlay);
+    }
+
+    var isError   = !!errorMsg;
+    var isDone    = !!successUrn;
+    var accentClr = isError ? '#e03' : isDone ? '#22aa55' : '#0696d7';
+    var icon      = isError ? '&#9888;' : isDone ? '&#10003;' : '';
+    var bodyText  = errorMsg || message;
+
+    overlay.innerHTML =
+        '<div style="background:#fff;border-radius:8px;padding:32px 36px;max-width:460px;width:90%;box-shadow:0 8px 40px rgba(0,0,0,0.28);font-family:\'ArtifaktElement\',\'Helvetica Neue\',Arial,sans-serif;">'
+      + '<div style="font-size:15px;font-weight:700;color:' + accentClr + ';margin-bottom:12px;">'
+      + (icon ? '<span style="margin-right:6px;">' + icon + '</span>' : '')
+      + (isError ? 'Design Automation Error' : isDone ? 'Success' : 'Design Automation') + '</div>'
+      + '<div style="font-size:13px;color:#3c3c3c;line-height:1.6;white-space:pre-wrap;">' + _peEscapeHtml(bodyText) + '</div>'
+      + (!isError && !isDone
+          ? '<div style="margin-top:18px;display:flex;align-items:center;gap:10px;">'
+          + '<div style="width:18px;height:18px;border:2px solid #d5dbe1;border-top-color:#0696d7;border-radius:50%;animation:pe-spin 0.9s linear infinite;flex-shrink:0;"></div>'
+          + '<span style="font-size:12px;color:#586370;">This may take several minutes for large models.</span></div>'
+          : '')
+      + (reportUrl
+          ? '<div style="margin-top:14px;"><a href="' + _peEscapeHtml(reportUrl) + '" target="_blank" rel="noopener noreferrer"'
+          + ' style="font-size:12px;color:#0696d7;">View processing report &#8599;</a></div>'
+          : '')
+      + (successUrn
+          ? '<div style="margin-top:10px;font-size:11px;color:#586370;word-break:break-all;">Version: ' + _peEscapeHtml(successUrn) + '</div>'
+          : '')
+      + ((isError || isDone)
+          ? '<button onclick="document.getElementById(\'peDAOverlay\').remove()" '
+          + 'style="margin-top:20px;padding:7px 20px;background:#0696d7;color:white;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:600;">Close</button>'
+          : '')
+      + '</div>';
+
+    // Spinner keyframe (injected once)
+    if (!document.getElementById('peDASpinStyle')) {
+        var s = document.createElement('style');
+        s.id = 'peDASpinStyle';
+        s.textContent = '@keyframes pe-spin { to { transform: rotate(360deg); } }';
+        document.head.appendChild(s);
     }
 }
 
-// ============================================================================
-// INVESTIGATION FUNCTIONS - Expose to window for console testing
-// ============================================================================
-// Usage from browser console after loading a model:
-//   await window.testFilterByCategory('Walls')
-//   await window.testInspectWallProperties()
-// ============================================================================
-
-async function triggerCategoryFilter() {
-    const checked = document.querySelectorAll('#categoryResults input[type="checkbox"]:checked');
-    if (checked.length === 0) {
-        await clearCategoryFilter();
-    } else {
-        await filterBySelectedCategories();
-    }
-}
-
-window.testFilterByCategory = filterByCategoryInViewer;
-window.testInspectWallProperties = inspectWallProperties;
-window.testGetCategoriesFromViewer = getCategoriesFromViewer;

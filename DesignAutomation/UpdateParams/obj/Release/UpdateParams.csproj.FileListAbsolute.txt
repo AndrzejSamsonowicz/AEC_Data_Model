@@ -1,0 +1,8 @@
+c:\MCPServer\AEC Data Model\DesignAutomation\UpdateParams\obj\Release\UpdateParams.csproj.AssemblyReference.cache
+c:\MCPServer\AEC Data Model\DesignAutomation\UpdateParams\obj\Release\UpdateParams.csproj.CoreCompileInputs.cache
+c:\MCPServer\AEC Data Model\DesignAutomation\UpdateParams\bin\Release\UpdateParamsApp.addin
+c:\MCPServer\AEC Data Model\DesignAutomation\UpdateParams\bin\Release\UpdateParamsApp.dll
+c:\MCPServer\AEC Data Model\DesignAutomation\UpdateParams\bin\Release\Newtonsoft.Json.dll
+c:\MCPServer\AEC Data Model\DesignAutomation\UpdateParams\bin\Release\Newtonsoft.Json.xml
+c:\MCPServer\AEC Data Model\DesignAutomation\UpdateParams\obj\Release\UpdatePa.55AA1DD0.Up2Date
+c:\MCPServer\AEC Data Model\DesignAutomation\UpdateParams\obj\Release\UpdateParamsApp.dll

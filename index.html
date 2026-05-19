@@ -379,11 +379,12 @@ query CountEls($elementGroupId: ID!, $filter: ElementFilterInput, $pagination: P
             <div class="viewer-body">
                 <div class="viewer-sidebar">
                     <div class="viewer-sidebar-header">
-                        Category Filter
+                        Parameter Edit
                     </div>
                     <div class="viewer-sidebar-content">
-                        <div id="categoryResults"></div>
-                        <div id="elementList" style="margin-top: 15px;"></div>
+                        <div id="paramEditPanel">
+                            <div style="padding:4px 0 12px;color:#888;font-size:12px;line-height:1.5;">Select parameters in the treemap and click "Show in Viewer ►" to populate this panel.</div>
+                        </div>
                     </div>
                 </div>
                 <div class="properties-panel" id="propertiesPanel">
@@ -449,8 +450,10 @@ query CountEls($elementGroupId: ID!, $filter: ElementFilterInput, $pagination: P
             </div>
             <div id="paramExplorerBody">
                 <div id="paramExplorerLoading" style="display:none;">
-                    <div class="spinner"></div>
-                    <div id="paramExplorerProgress">Loading&hellip;</div>
+                    <div class="pe-loading-card">
+                        <div id="paramExplorerProgress">Loading&hellip;</div>
+                        <div class="pe-progress-track"><div class="pe-progress-bar"></div></div>
+                    </div>
                 </div>
                 <div id="paramExplorerTreemap"></div>
             </div>
