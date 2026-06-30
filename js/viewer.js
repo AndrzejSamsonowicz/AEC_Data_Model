@@ -91,6 +91,7 @@ function openViewerModal(elementGroups) {
 
     currentElementGroup = primary;
     currentLoadedFiles = files;
+    window._viewerEgIdByModel = new Map();   // reset model→egId map for this session
     const modal = document.getElementById('viewerModal');
     const title = document.getElementById('viewerModalTitle');
     const loading = document.getElementById('viewerLoading');
@@ -204,7 +205,13 @@ function loadModelsInViewer(viewerInstance, files) {
                 ? `Loading model ${i + 1} of ${files.length}...`
                 : 'Loading model...';
             try {
-                await loadOne(files[i], i > 0);
+                const loadedModel = await loadOne(files[i], i > 0);
+                // Store model→egId so the highlight cache can use composite keys
+                if (loadedModel && files[i].id) {
+                    if (!window._viewerEgIdByModel) window._viewerEgIdByModel = new Map();
+                    window._viewerEgIdByModel.set(loadedModel, files[i].id);
+                    console.log(`📌 Mapped model "${files[i].name}" → egId …${String(files[i].id).slice(-10)}`);
+                }
             } catch (err) {
                 console.error(err.message);
                 loading.textContent = err.message;
@@ -221,16 +228,29 @@ function loadModelsInViewer(viewerInstance, files) {
         const onTreeCreated = () => {
             console.log('Object tree created');
             viewerInstance.removeEventListener(Autodesk.Viewing.OBJECT_TREE_CREATED_EVENT, onTreeCreated);
-            // Auto-isolate specific elements (triggered from PE "Show in Viewer")
+            // Auto-isolate specific elements (triggered from PE "Show in Viewer").
+            // Skip when the PE panel is active — _peIsolateWithFocus handles all
+            // visualization and isolateByRevitIds would race-condition red over blue.
+            const peActive = window._pendingParamEditRows && window._pendingParamEditRows.length > 0;
             if (pendingRevitElementIds && pendingRevitElementIds.length > 0) {
                 const ids = pendingRevitElementIds;
                 const cat = pendingRevitCategory;
                 pendingRevitElementIds = null;
                 pendingRevitCategory = null;
-                isolateByRevitIds(ids, cat).catch(e => console.warn('Auto-isolate by Revit ID failed:', e.message));
+                if (!peActive) {
+                    isolateByRevitIds(ids, cat).catch(e => console.warn('Auto-isolate by Revit ID failed:', e.message));
+                }
             }
         };
         viewerInstance.addEventListener(Autodesk.Viewing.OBJECT_TREE_CREATED_EVENT, onTreeCreated);
+        // Race-condition guard: for cached/fast-loading models the tree may already
+        // be ready before the listener was attached — trigger immediately in that case.
+        const loadedModels = viewerInstance.getAllModels ? viewerInstance.getAllModels() : [];
+        const peActiveNow = window._pendingParamEditRows && window._pendingParamEditRows.length > 0;
+        if (!peActiveNow && pendingRevitElementIds && loadedModels.some(m => m.getInstanceTree && m.getInstanceTree())) {
+            console.log('Object tree already ready — triggering isolation immediately');
+            onTreeCreated();
+        }
     })();
 }
 
@@ -287,7 +307,7 @@ async function isolateByRevitIds(revitIds, category) {
                     const nameLower = (p.displayName || '').toLowerCase();
                     if (nameLower.includes('elementid') || nameLower.includes('element id') || nameLower.includes('element_id')) {
                         const valStr = String(p.displayValue);
-                        peCache.set(valStr, result.dbId);
+                        peCache.set(valStr, { dbId: result.dbId, model: modelRef });
                         if (idSet.has(valStr)) hits.push(result.dbId);
                         break;
                     }
@@ -510,11 +530,16 @@ function populateParamEditPanel() {
     st.cellSelected = new Set();
     st.lastCellClick = -1;
     window._peRevitDbIdCache = null;   // clear scan cache whenever new rows are loaded
+    window._peViewerRevitIds = null;    // clear viewer ID index so it rebuilds on next scan
     _peRenderParamTable(panel, rows);
 }
 
 function _peRenderParamTable(panel, rows) {
     const st = window._peTableState;
+    // Detect multi-file: check if rows span more than one file
+    const fileNames = [...new Set(rows.map(r => r.fileContext?.fileName).filter(Boolean))];
+    const isMultiFile = fileNames.length > 1;
+
     let html = '<div style="overflow-x:hidden;margin-bottom:2px;">';
     html += '<table id="peParamTable" style="width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed;font-family:\'ArtifaktElement\',\'Helvetica Neue\',Arial,sans-serif;">';
     html += '<colgroup><col style="width:20px"><col style="width:35%"><col style="width:25%"><col></colgroup>';
@@ -525,7 +550,20 @@ function _peRenderParamTable(panel, rows) {
     html += '<th style="padding:7px 6px;text-align:left;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;">New Value</th>';
     html += '</tr></thead>';
     html += '<tbody id="peParamTbody">';
+    var lastFileName = null;
     rows.forEach(function(row, i) {
+        // Insert a file separator row when the file changes (multi-file mode)
+        if (isMultiFile) {
+            var rowFile = row.fileContext?.fileName || '';
+            if (rowFile !== lastFileName) {
+                lastFileName = rowFile;
+                html += '<tr class="pe-file-separator" data-file="' + _peEscapeHtml(rowFile) + '">'
+                      + '<td colspan="4" style="padding:5px 8px;background:#e8f4fb;color:#0d6ea0;font-size:11px;font-weight:600;'
+                      + 'border-bottom:1px solid #b3d9f0;letter-spacing:0.03em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'
+                      + '\uD83D\uDCC2 ' + _peEscapeHtml(rowFile)
+                      + '</td></tr>';
+            }
+        }
         const isSel = st.selected.has(i);
         const bg = isSel ? '#e3f4fc' : (i % 2 === 0 ? '#ffffff' : '#f4f7f9');
         const bleft = isSel ? '3px solid #0696d7' : '3px solid transparent';
@@ -546,7 +584,11 @@ function _peRenderParamTable(panel, rows) {
         html += '</tr>';
     });
     html += '</tbody></table></div>';
-    html += '<button onclick="applyParamChangesViaDA()" style="margin-top:10px;width:100%;padding:9px 16px;background:#0696d7;color:white;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:600;font-family:\'ArtifaktElement\',\'Helvetica Neue\',Arial,sans-serif;letter-spacing:0.01em;transition:background 0.15s;">Apply via Design Automation \u25ba</button>';
+    var fileCount = (window._pendingDAFileContexts || []).length;
+    var btnLabel = fileCount > 1
+        ? 'Apply via Design Automation (' + fileCount + ' files) \u25ba'
+        : 'Apply via Design Automation \u25ba';
+    html += '<button onclick="applyParamChangesViaDA()" style="margin-top:10px;width:100%;padding:9px 16px;background:#0696d7;color:white;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:600;font-family:\'ArtifaktElement\',\'Helvetica Neue\',Arial,sans-serif;letter-spacing:0.01em;transition:background 0.15s;">' + btnLabel + '</button>';
     panel.innerHTML = html;
     _peBindTableEvents();
 }
@@ -885,72 +927,223 @@ function _peHighlightSelectedInViewer() {
             return;
         }
 
-        // All rows supply the full context (red); selected row(s) get the focus color (blue)
-        const allRevitIds   = [];
-        const focusRevitIds = [];
-        rows.forEach(function(r) { if (r && r.revitIds) allRevitIds.push(...r.revitIds); });
-        st.selected.forEach(function(i) { if (rows[i] && rows[i].revitIds) focusRevitIds.push(...rows[i].revitIds); });
+        // Build {revitId, egId} pairs — egId disambiguates identical revitIds across files
+        const allPairs   = [];
+        const focusPairs = [];
+        rows.forEach(function(r) {
+            if (r && r.revitIds) {
+                const egId = r.fileContext?.egId || '';
+                r.revitIds.forEach(function(rid) { allPairs.push({ revitId: String(rid), egId }); });
+            }
+        });
+        st.selected.forEach(function(i) {
+            if (rows[i] && rows[i].revitIds) {
+                const egId = rows[i].fileContext?.egId || '';
+                rows[i].revitIds.forEach(function(rid) { focusPairs.push({ revitId: String(rid), egId }); });
+            }
+        });
 
-        if (focusRevitIds.length === 0) {
+        if (focusPairs.length === 0) {
             console.warn('No Revit IDs for selected row(s) — cannot highlight.');
             return;
         }
-        try { await _peIsolateWithFocus(allRevitIds, focusRevitIds); }
+        try { await _peIsolateWithFocus(allPairs, focusPairs); }
         catch(e) { console.warn('Row highlight failed:', e.message); }
     }, 80);
 }
 
 // Isolate all matched elements, colour context=red, focus=blue.
-// The cache is built by the initial isolateByRevitIds full-model scan (piggybacked above).
-// Falls back to its own scan if the viewer was reloaded without a prior isolateByRevitIds call.
-async function _peIsolateWithFocus(allRevitIds, focusRevitIds) {
-    const modelRef = viewer.model;
+// Build (and cache) a Set of all Revit Element IDs that are actually loaded in the viewer.
+// Elements NOT in this set have no 3D geometry in the viewer (materials, analytical elements,
+// MEP schedules, sun path, views, etc.) and should be excluded from Parameter Explorer tiles.
+// Uses propFilter to fetch ONLY the Element ID property — much faster than fetching all props.
+async function _peBuildViewerRevitIds() {
+    // If already cached in _peViewerRevitIds, return immediately.
+    if (window._peViewerRevitIds) return window._peViewerRevitIds;
 
-    // Build cache if missing — same proven logic as isolateByRevitIds
-    if (!window._peRevitDbIdCache || window._peRevitDbIdCache.size === 0) {
-        const instanceTree = modelRef.getInstanceTree();
-        if (!instanceTree) throw new Error('Instance tree not available');
-        const dbIdsToScan = [];
-        instanceTree.enumNodeChildren(instanceTree.getRootId(), function(dbId) { dbIdsToScan.push(dbId); }, true);
-        const cache = new Map();
-        await new Promise(function(resolve, reject) {
-            modelRef.getBulkProperties(dbIdsToScan, {}, function(results) {
-                results.forEach(function(result) {
-                    for (var i = 0; i < result.properties.length; i++) {
-                        var p = result.properties[i];
-                        var nl = (p.displayName || '').toLowerCase();
-                        if (nl.includes('elementid') || nl.includes('element id') || nl.includes('element_id')) {
-                            cache.set(String(p.displayValue), result.dbId);
-                            break;
-                        }
-                    }
-                });
-                resolve();
-            }, reject);
-        });
-        window._peRevitDbIdCache = cache;
-        console.log('PE focus: built cache with', cache.size, 'entries');
+    // If _peRevitDbIdCache was already built by a prior Show-in-Viewer action, derive from it
+    // (free — no additional API call needed).
+    const existingCache = window._peRevitDbIdCache;
+    if (existingCache && existingCache.size > 0) {
+        const ids = new Set();
+        for (const key of existingCache.keys()) {
+            if (key !== '_modelCount' && !key.includes('::')) ids.add(key);
+        }
+        if (ids.size > 0) {
+            window._peViewerRevitIds = ids;
+            console.log(`[PE] Viewer Revit ID index from cache: ${ids.size} elements`);
+            return ids;
+        }
     }
 
-    const cache    = window._peRevitDbIdCache;
-    const allDbIds   = [...new Set(allRevitIds.map(String))  ].map(id => cache.get(id)).filter(Boolean);
-    const focusDbIds = [...new Set(focusRevitIds.map(String))].map(id => cache.get(id)).filter(Boolean);
+    const allModels = (viewer.getVisibleModels ? viewer.getVisibleModels() : null)
+                   || (viewer.impl && viewer.impl.modelQueue ? viewer.impl.modelQueue().getModels() : null)
+                   || [viewer.model];
+    if (!allModels || !allModels.length) return null;
 
-    console.log('PE focus: allDbIds', allDbIds.length, 'focusDbIds', focusDbIds.length);
-    if (allDbIds.length === 0) { console.warn('No viewer objects matched for any row.'); return; }
+    const ids = new Set();
+    // propFilter limits the returned properties to only those matching these names —
+    // dramatically faster than fetching all properties for every element.
+    const elemIdFilter = { propFilter: ['ElementId', 'Element ID', 'Element_ID'] };
+    await Promise.all(allModels.map(m => new Promise(resolve => {
+        const tree = m.getInstanceTree ? m.getInstanceTree() : null;
+        if (!tree) { resolve(); return; }
+        const dbIds = [];
+        tree.enumNodeChildren(tree.getRootId(), d => dbIds.push(d), true);
+        m.getBulkProperties(dbIds, elemIdFilter, results => {
+            for (const r of results) {
+                for (const p of r.properties) {
+                    const n = (p.displayName || '').toLowerCase();
+                    if (n.includes('element') && n.includes('id')) {
+                        const v = String(p.displayValue || '');
+                        if (v && v !== '0') ids.add(v);
+                        break;
+                    }
+                }
+            }
+            resolve();
+        }, resolve);  // resolve on error too — scan continues without viewer filter
+    })));
 
-    viewer.clearThemingColors(modelRef);
-    viewer.isolate(allDbIds, modelRef);
+    if (ids.size > 0) {
+        window._peViewerRevitIds = ids;
+        console.log(`[PE] Viewer Revit ID index built: ${ids.size} elements`);
+    }
+    return ids.size > 0 ? ids : null;
+}
 
-    const red  = new THREE.Vector4(1,    0.15, 0.1,  1);
-    const blue = new THREE.Vector4(0.06, 0.58, 0.85, 1);
-    const focusSet = new Set(focusDbIds);
-    allDbIds.forEach(function(dbId) {
-        viewer.setThemingColor(dbId, focusSet.has(dbId) ? blue : red, modelRef);
+// Accepts arrays of {revitId, egId} pairs.
+// Uses a VOTING approach to match viewer model objects to file egIds:
+// for each model we count how many of its Revit Element IDs appear in the
+// pending rows for each egId — the egId with the most matches wins.
+// This avoids relying on JavaScript object identity or model load order.
+async function _peIsolateWithFocus(allPairs, focusPairs) {
+    // Clear debug log so this run is the only thing visible
+    fetch(window.API_BASE + '/api/log/clear', { method: 'POST', headers: { 'Content-Type': 'application/json' } }).catch(() => {});
+
+    const allModels = (viewer.getVisibleModels ? viewer.getVisibleModels() : null)
+                   || (viewer.impl && viewer.impl.modelQueue ? viewer.impl.modelQueue().getModels() : null)
+                   || [viewer.model];
+
+    const cachedModelCount = (window._peRevitDbIdCache && window._peRevitDbIdCache._modelCount) || 0;
+    if (!window._peRevitDbIdCache || window._peRevitDbIdCache.size === 0 || cachedModelCount < allModels.length) {
+
+        // Build revitId → Set<egId> index from all pending rows so we can vote
+        var ridToEgIds = new Map();
+        (window._pendingParamEditRows || []).forEach(function(row) {
+            var eg = row.fileContext && row.fileContext.egId;
+            if (!eg) return;
+            (row.revitIds || []).forEach(function(rid) {
+                var r = String(rid);
+                if (!ridToEgIds.has(r)) ridToEgIds.set(r, new Set());
+                ridToEgIds.get(r).add(eg);
+            });
+        });
+
+        var cache = new Map();
+
+        await Promise.all(allModels.map(function(modelRef) {
+            return new Promise(function(resolve, reject) {
+                var instanceTree = modelRef.getInstanceTree();
+                if (!instanceTree) { resolve(); return; }
+                var dbIdsToScan = [];
+                instanceTree.enumNodeChildren(instanceTree.getRootId(), function(dbId) { dbIdsToScan.push(dbId); }, true);
+                modelRef.getBulkProperties(dbIdsToScan, {}, function(results) {
+                    // Pass 1: collect revitId→dbId and cast votes for egId
+                    var modelRids = new Map(); // revitId → dbId
+                    var votes = new Map();     // egId → count
+                    results.forEach(function(result) {
+                        for (var i = 0; i < result.properties.length; i++) {
+                            var p = result.properties[i];
+                            var nl = (p.displayName || '').toLowerCase();
+                            if (nl.includes('elementid') || nl.includes('element id') || nl.includes('element_id')) {
+                                var rid = String(p.displayValue);
+                                modelRids.set(rid, result.dbId);
+                                var egs = ridToEgIds.get(rid);
+                                if (egs) egs.forEach(function(eg) { votes.set(eg, (votes.get(eg) || 0) + 1); });
+                                break;
+                            }
+                        }
+                    });
+
+                    // Determine egId for this model by highest vote
+                    var bestEgId = '', bestCount = 0;
+                    votes.forEach(function(cnt, eg) { if (cnt > bestCount) { bestCount = cnt; bestEgId = eg; } });
+                    console.log('PE cache: model matched egId …' + (bestEgId ? bestEgId.slice(-10) : '(none)') + ' (' + bestCount + ' votes, ' + modelRids.size + ' elements)');
+
+                    // Pass 2: store in cache with composite key
+                    modelRids.forEach(function(dbId, rid) {
+                        var entry = { dbId: dbId, model: modelRef };
+                        if (bestEgId) cache.set(bestEgId + '::' + rid, entry);
+                        cache.set(rid, entry); // plain fallback (last model wins for single-model)
+                    });
+                    resolve();
+                }, reject);
+            });
+        }));
+
+        cache._modelCount = allModels.length;
+        window._peRevitDbIdCache = cache;
+        console.log('PE focus: cache built — ' + cache.size + ' entries across ' + allModels.length + ' model(s)');
+    }
+
+    var cache = window._peRevitDbIdCache;
+
+    var lookup = function(pair) {
+        var entry = pair.egId ? cache.get(pair.egId + '::' + pair.revitId) : null;
+        if (!entry) entry = cache.get(pair.revitId);
+        if (!entry) return null;
+        if (typeof entry === 'object' && entry.dbId !== undefined) return entry;
+        return { dbId: entry, model: viewer.model };
+    };
+
+    var dedup = function(pairs) {
+        var seen = new Set();
+        return pairs.filter(function(p) {
+            var k = (p.egId || '') + '::' + p.revitId;
+            return seen.has(k) ? false : (seen.add(k), true);
+        });
+    };
+
+    var allEntries   = dedup(allPairs).map(lookup).filter(Boolean);
+    var focusEntries = dedup(focusPairs).map(lookup).filter(Boolean);
+
+    console.log('PE focus: allEntries=' + allEntries.length + ' focusEntries=' + focusEntries.length);
+    if (allEntries.length === 0) { console.warn('No viewer objects matched for any row.'); return; }
+
+    var byModel = new Map();
+    allEntries.forEach(function(e) {
+        if (!byModel.has(e.model)) byModel.set(e.model, { all: [], focusSet: new Set() });
+        byModel.get(e.model).all.push(e.dbId);
+    });
+    focusEntries.forEach(function(e) {
+        if (!byModel.has(e.model)) byModel.set(e.model, { all: [], focusSet: new Set() });
+        byModel.get(e.model).focusSet.add(e.dbId);
     });
 
-    viewer.fitToView(focusDbIds.length > 0 ? focusDbIds : allDbIds, modelRef);
-    const btn = document.getElementById('viewerShowAllBtn');
+    var blue = new THREE.Vector4(0.35, 0.70, 1.0, 1);
+    // Isolating a non-existent dbId (-1) causes Forge Viewer to ghost ALL elements
+    // in that model — used for models that have no focused element.
+    var GHOST_ALL = [-1];
+
+    allModels.forEach(function(m) { viewer.clearThemingColors(m); });
+
+    // For every loaded model: isolate only the focused element(s) so everything
+    // else — including other rows and other files — becomes semi-transparent.
+    allModels.forEach(function(m) {
+        var grp = byModel.get(m);
+        var focusIds = grp ? [...grp.focusSet] : [];
+        if (focusIds.length > 0) {
+            viewer.isolate(focusIds, m);
+            focusIds.forEach(function(dbId) {
+                viewer.setThemingColor(dbId, blue, m);
+            });
+        } else {
+            viewer.isolate(GHOST_ALL, m);  // ghost everything in this model
+        }
+    });
+
+    var btn = document.getElementById('viewerShowAllBtn');
     if (btn) btn.style.display = '';
 }
 
@@ -987,11 +1180,42 @@ function _peParamTypeLabelForViewer(paramName) {
 }
 
 function applyParamChangesViaDA() {
-    const rows   = window._pendingParamEditRows || [];
-    const ctx    = window._pendingDAFileContext || {};
+    const rows    = window._pendingParamEditRows || [];
     const session = sessionId;
+    const fileContexts = window._pendingDAFileContexts;
 
-    // Collect rows that have a new value entered
+    // ── Multi-file path ───────────────────────────────────────────────────────
+    if (fileContexts && fileContexts.length > 1) {
+        // Group rows by fileVersionUrn and collect changes per file
+        var changesPerFile = new Map();  // fileVersionUrn → { ctx, changes[] }
+        rows.forEach(function(row) {
+            var newVal = (row.newValue || '').trim();
+            if (!newVal || newVal === row.currentValue) return;
+            var urn = row.fileContext && row.fileContext.fileVersionUrn;
+            if (!urn) return;
+            if (!changesPerFile.has(urn)) {
+                changesPerFile.set(urn, { ctx: row.fileContext, changes: [] });
+            }
+            (row.revitIds || []).forEach(function(rid) {
+                changesPerFile.get(urn).changes.push({ elementId: String(rid), paramName: row.paramName, newValue: newVal });
+            });
+        });
+
+        if (changesPerFile.size === 0) {
+            alert('No new values entered. Edit the "New Value" cells first.');
+            return;
+        }
+        if (!session) {
+            alert('No active session. Please log in again.');
+            return;
+        }
+        _peSubmitMultiFileDA([...changesPerFile.values()], session);
+        return;
+    }
+
+    // ── Single-file path (unchanged) ─────────────────────────────────────────
+    const ctx = window._pendingDAFileContext || (fileContexts && fileContexts[0]) || {};
+
     const changes = [];
     rows.forEach(function(row) {
         var newVal = (row.newValue || '').trim();
@@ -1014,7 +1238,6 @@ function applyParamChangesViaDA() {
         return;
     }
 
-    // Log the full file context to console so the user can verify the correct file is selected
     console.group('DA Submit — file context');
     console.log('fileName:      ', ctx.fileName);
     console.log('fileVersionUrn:', ctx.fileVersionUrn);
@@ -1025,7 +1248,6 @@ function applyParamChangesViaDA() {
 
     _peShowDAProgress('Resolving file\u2026 (check browser Console for file URN details)', null);
 
-    // Resolve projectId lazily if not already known
     var resolvePromise;
     if (ctx.projectId) {
         resolvePromise = Promise.resolve(ctx.projectId);
@@ -1081,6 +1303,174 @@ function applyParamChangesViaDA() {
     });
 }
 
+// ── Multi-file DA orchestration ───────────────────────────────────────────────
+// Processes fileBatches = [{ ctx, changes[] }] sequentially, one DA workitem per file.
+async function _peSubmitMultiFileDA(fileBatches, session) {
+    var total     = fileBatches.length;
+    var succeeded = 0;
+    var errors    = [];
+
+    for (var i = 0; i < fileBatches.length; i++) {
+        var batch    = fileBatches[i];
+        var ctx      = batch.ctx;
+        var changes  = batch.changes;
+        var fileLabel = '(' + (i + 1) + '/' + total + ') ' + (ctx.fileName || 'model.rvt');
+
+        // Resolve projectId
+        var projectId = ctx.projectId;
+        if (!projectId) {
+            if (!ctx.hubId) {
+                errors.push({ file: ctx.fileName, msg: 'Cannot determine ACC project — missing hubId.' });
+                continue;
+            }
+            try {
+                _peShowDAProgress('Resolving project for ' + fileLabel + '\u2026', null);
+                var resolveRes = await fetch(
+                    '/api/da/resolve-project?sessionId=' + encodeURIComponent(session)
+                    + '&hubId=' + encodeURIComponent(ctx.hubId)
+                    + '&fileVersionUrn=' + encodeURIComponent(ctx.fileVersionUrn)
+                    + (ctx.region ? '&region=' + encodeURIComponent(ctx.region) : '')
+                );
+                var resolveData = await resolveRes.json();
+                if (resolveData.error) throw new Error(resolveData.error);
+                projectId = resolveData.projectId;
+                ctx.projectId = projectId;
+            } catch (err) {
+                errors.push({ file: ctx.fileName, msg: 'Resolve project failed: ' + err.message });
+                continue;
+            }
+        }
+
+        // Submit workitem
+        var submitData;
+        try {
+            _peShowDAProgress('Submitting ' + fileLabel + '\u2026', null);
+            console.group('DA Submit (multi) — ' + ctx.fileName);
+            console.log('fileVersionUrn:', ctx.fileVersionUrn);
+            console.log('projectId:     ', projectId);
+            console.log('hubId:         ', ctx.hubId);
+            console.log('changes:       ', changes.length);
+            console.groupEnd();
+
+            var submitRes = await fetch('/api/da/submit', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    sessionId:      session,
+                    changes:        changes,
+                    fileVersionUrn: ctx.fileVersionUrn,
+                    projectId:      projectId,
+                    hubId:          ctx.hubId || null,
+                    fileName:       ctx.fileName || 'model.rvt'
+                })
+            });
+            submitData = await submitRes.json();
+            if (submitData.error) throw new Error(submitData.error);
+        } catch (err) {
+            errors.push({ file: ctx.fileName, msg: 'Submit failed: ' + err.message });
+            continue;
+        }
+
+        // Poll workitem to completion
+        try {
+            var wi = await _pePollWorkItemAsync(submitData.workItemId, session, function(status, elapsed) {
+                _peShowDAProgress(fileLabel + '\nRevit engine: ' + status + ' (' + elapsed + 's elapsed)\u2026', null);
+            });
+
+            if (wi.status === 'success') {
+                if (submitData.storageObjectId) {
+                    _peShowDAProgress('Finalizing ' + fileLabel + '\u2026', null);
+                    await _peFinalizeAsync(submitData, session);
+                } else if (submitData.itemId) {
+                    _peShowDAProgress('Publishing ' + fileLabel + '\u2026', null);
+                    await _pePublishAsync(submitData, session);
+                }
+                succeeded++;
+            } else {
+                var wiMsg = 'WorkItem ' + wi.status;
+                if (wi.reportUrl) wiMsg += '\nReport: ' + wi.reportUrl;
+                errors.push({ file: ctx.fileName, msg: wiMsg });
+            }
+        } catch (err) {
+            errors.push({ file: ctx.fileName, msg: 'Processing error: ' + err.message });
+        }
+    }
+
+    // Final summary
+    if (errors.length === 0) {
+        _peShowDAProgress(null, null, null, succeeded + ' file' + (succeeded > 1 ? 's' : '') + ' updated successfully.');
+    } else if (succeeded > 0) {
+        var summary = succeeded + ' of ' + total + ' files updated.\n\nErrors:\n'
+            + errors.map(function(e) { return '\u2022 ' + e.file + ': ' + e.msg; }).join('\n');
+        _peShowDAProgress(null, summary);
+    } else {
+        var summary = 'All files failed:\n'
+            + errors.map(function(e) { return '\u2022 ' + e.file + ': ' + e.msg; }).join('\n');
+        _peShowDAProgress(null, summary);
+    }
+}
+
+// Promise-based workitem poller — resolves with the final workitem object.
+function _pePollWorkItemAsync(workItemId, session, onProgress) {
+    return new Promise(function(resolve, reject) {
+        function poll(attempt) {
+            fetch('/api/da/workitem/' + workItemId + '?sessionId=' + encodeURIComponent(session))
+                .then(function(r) { return r.json(); })
+                .then(function(wi) {
+                    if (wi.error) { reject(new Error(wi.error)); return; }
+                    var status = wi.status;
+                    if (status === 'pending' || status === 'inprogress') {
+                        if (onProgress) onProgress(status, attempt * 6);
+                        setTimeout(function() { poll(attempt + 1); }, 6000);
+                    } else {
+                        resolve(wi);
+                    }
+                })
+                .catch(reject);
+        }
+        poll(0);
+    });
+}
+
+// Promise wrapper for the finalize (legacy OSS→DM) endpoint.
+function _peFinalizeAsync(submitData, session) {
+    return fetch('/api/da/finalize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            sessionId:       session,
+            projectId:       submitData.projectId,
+            itemId:          submitData.itemId,
+            storageObjectId: submitData.storageObjectId,
+            fileName:        submitData.fileName,
+            versionExtType:  submitData.versionExtType,
+            versionExtData:  submitData.versionExtData,
+            uploadKey:       submitData.uploadKey,
+            outBucket:       submitData.outBucket,
+            outObjKey:       submitData.outObjKey
+        })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) { if (data.error) throw new Error(data.error); return data; });
+}
+
+// Promise wrapper for the C4R publish endpoint.
+function _pePublishAsync(submitData, session) {
+    return fetch('/api/da/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: session, projectId: submitData.projectId, itemId: submitData.itemId })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        // 403 = no publish permission but DA succeeded — treat as soft success
+        if (data.error && !data.commandId) {
+            console.warn('Publish warning:', data.error);
+        }
+        return data;
+    });
+}
+
 function _pePollWorkItem(workItemId, submitData, attempt) {
     var session = sessionId;
     fetch('/api/da/workitem/' + workItemId + '?sessionId=' + encodeURIComponent(session))
@@ -1096,9 +1486,6 @@ function _pePollWorkItem(workItemId, submitData, attempt) {
                 );
                 setTimeout(function() { _pePollWorkItem(workItemId, submitData, attempt + 1); }, 6000);
             } else if (status === 'success') {
-                // After DA completes (SaveCloudModel or SynchronizeWithCentral), call C4RModelPublish
-                // to create an explicit published version visible in ACC.
-                // Legacy download/upload path: finalize by creating a DM version from the OSS object.
                 if (submitData.storageObjectId) {
                     _peShowDAProgress('Revit processing complete \u2014 creating new file version in ACC\u2026', null);
                     _peFinalizeDAResult(submitData, wi);
@@ -1109,7 +1496,6 @@ function _pePollWorkItem(workItemId, submitData, attempt) {
                     _peShowDAProgress('Done! Parameters updated in Revit model.', null, null, 'success');
                 }
             } else {
-                // failed or cancelled — show link to report
                 var msg = 'WorkItem ' + status + '.';
                 if (wi.reportUrl) msg += '\n\nView report: ' + wi.reportUrl;
                 _peShowDAProgress(null, msg, wi.reportUrl);

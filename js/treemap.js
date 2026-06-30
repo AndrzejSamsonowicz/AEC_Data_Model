@@ -133,9 +133,8 @@ function _showPicker(data) {
             if (!paramMap.has(name)) {
                 paramMap.set(name, { isNumeric: p.type === 2 || p.type === 3, count: 0 });
             }
-            if (p.displayValue !== null && p.displayValue !== undefined && p.displayValue !== '') {
-                paramMap.get(name).count++;
-            }
+            // Count every element that has the parameter (including empty values)
+            paramMap.get(name).count++;
         }
     }
 
@@ -204,8 +203,11 @@ function treemapBuild() {
     for (const el of _tmData) {
         for (const [pName] of _tmParams) {
             const prop = el.properties.find(p => (p.displayName || p.attributeName) === pName);
-            const raw  = prop ? prop.displayValue : null;
-            const val  = (raw === null || raw === undefined || raw === '') ? '(empty)' : String(raw).trim();
+            // Skip elements that don't have this parameter at all
+            if (!prop) continue;
+            const raw  = prop.displayValue;
+            const isEmpty = raw === null || raw === undefined || raw === '';
+            const val  = isEmpty ? '(empty)' : String(raw).trim();
             const key  = `${pName}::${val}`;
             if (!_tmLeafMap.has(key)) _tmLeafMap.set(key, []);
             _tmLeafMap.get(key).push({ dbId: el.dbId, model: el.model });
@@ -240,10 +242,12 @@ function _buildHierarchy(data, params) {
             const prop = el.properties.find(
                 p => (p.displayName || p.attributeName) === pName
             );
-            const raw  = prop ? prop.displayValue : null;
-            const key  = (raw === null || raw === undefined || raw === '')
-                ? '(empty)' : String(raw).trim();
-            const num  = (isNum && raw !== null && raw !== '' && !isNaN(+raw))
+            // Skip elements that don't have this parameter at all
+            if (!prop) continue;
+            const raw  = prop.displayValue;
+            const isEmpty = raw === null || raw === undefined || raw === '';
+            const key  = isEmpty ? '(empty)' : String(raw).trim();
+            const num  = (isNum && !isEmpty && !isNaN(+raw))
                 ? Math.abs(+raw) : 0;
 
             if (!tree[m][c][pName]) tree[m][c][pName] = { isNum, vals: {} };
@@ -427,8 +431,10 @@ function _highlightInTreemap(dbId) {
 
     for (const [pName] of _tmParams) {
         const prop = el.properties.find(p => (p.displayName || p.attributeName) === pName);
-        const raw  = prop ? prop.displayValue : null;
-        const val  = (raw === null || raw === undefined || raw === '') ? '(empty)' : String(raw).trim();
+        if (!prop) continue; // element doesn't have this parameter
+        const raw  = prop.displayValue;
+        const isEmpty = raw === null || raw === undefined || raw === '';
+        const val  = isEmpty ? '(empty)' : String(raw).trim();
         const key  = `${pName}::${val}`;
         d3.select('#tmSvgContainer').selectAll('rect[data-tmkey]')
             .filter(function() { return this.getAttribute('data-tmkey') === key; })

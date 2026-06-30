@@ -573,6 +573,66 @@ async function get2LeggedToken() {
     return _da2Legged;
 }
 
+// ── DA params large-payload helper ───────────────────────────────────────────────────────────
+// The DA /workitems body has a ~64KB limit.  When the encoded params JSON exceeds ~50KB
+// (common with large `changes` arrays) we store it in a temporary DM storage slot and pass
+// a signed download URL instead of a data: URI.  This reuses the same proven
+// signeds3upload/signeds3download flow used for the single-user output file.
+
+async function _uploadParamsToDM(paramsObj, dmProjectId, itemId, userToken) {
+    // 1. Create a temporary DM storage slot (same API as single-user output storage)
+    const storageResp = await axios.post(
+        `https://developer.api.autodesk.com/data/v1/projects/${dmProjectId}/storage`,
+        { jsonapi: { version: '1.0' },
+          data: { type: 'objects',
+                  attributes: { name: 'da-params.json' },
+                  relationships: { target: { data: { type: 'items', id: itemId } } } } },
+        { headers: { 'Authorization': `Bearer ${userToken}`, 'Content-Type': 'application/vnd.api+json' } }
+    );
+    const storageUrn = storageResp.data.data.id;  // urn:adsk.objects:os.object:bucket/key
+    const ossPath    = storageUrn.replace('urn:adsk.objects:os.object:', '');
+    const slashIdx   = ossPath.indexOf('/');
+    const bucket     = ossPath.substring(0, slashIdx);
+    const objKey     = decodeURIComponent(ossPath.substring(slashIdx + 1));
+    const body       = Buffer.from(JSON.stringify(paramsObj), 'utf8');
+
+    // 2. Get a pre-signed S3 upload URL
+    const initResp = await axios.get(
+        `https://developer.api.autodesk.com/oss/v2/buckets/${bucket}/objects/${encodeURIComponent(objKey)}/signeds3upload?parts=1`,
+        { headers: { 'Authorization': `Bearer ${userToken}` } }
+    );
+    const { uploadKey, urls: [s3Url] } = initResp.data;
+
+    // 3. Upload directly to S3 (no Authorization header — pre-signed URL)
+    await axios.put(s3Url, body, { headers: { 'Content-Type': 'application/octet-stream' } });
+
+    // 4. Complete the upload so OSS registers the object
+    await axios.post(
+        `https://developer.api.autodesk.com/oss/v2/buckets/${bucket}/objects/${encodeURIComponent(objKey)}/signeds3upload`,
+        { uploadKey, contentType: 'application/json' },
+        { headers: { 'Authorization': `Bearer ${userToken}`, 'Content-Type': 'application/json' } }
+    );
+
+    // 5. Get a signed download URL for DA to fetch during job execution
+    const dlResp = await axios.get(
+        `https://developer.api.autodesk.com/oss/v2/buckets/${bucket}/objects/${encodeURIComponent(objKey)}/signeds3download`,
+        { headers: { 'Authorization': `Bearer ${userToken}` } }
+    );
+    console.log(`DA: params uploaded to DM storage (bucket=${bucket})`);
+    return dlResp.data.url;
+}
+
+// Return a data: URI for small payloads; for large ones upload via DM storage and return a signed URL.
+async function _getParamsUrl(paramsObj, dmProjectId, itemId, userToken) {
+    const json = JSON.stringify(paramsObj);
+    if (Buffer.byteLength(json, 'utf8') <= 50000) {
+        return `data:application/json,${encodeURIComponent(json)}`;
+    }
+    console.log(`DA: params JSON ${Buffer.byteLength(json, 'utf8')} bytes — uploading to DM storage to avoid 413`);
+    return _uploadParamsToDM(paramsObj, dmProjectId, itemId, userToken);
+}
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
 // Generate unique bundle/activity IDs using Unix timestamp — guaranteed never to collide with prior sessions.
 // DA enforces a permanent 100-version-per-name limit that survives DELETE, so names can never be reused.
 function generateFreshDAIds() {
@@ -1384,7 +1444,8 @@ app.post('/api/da/submit', async (req, res) => {
 
             const paramsPayloadSingle = { projectGuid, modelGuid, region: cloudRegion, changes,
                 sourceFileName: extData.sourceFileName || extData.compositeParentFile || fileName || null };
-            const paramsUrlSingle = `data:application/json,${encodeURIComponent(JSON.stringify(paramsPayloadSingle))}`;
+            _step = 'prepare params';
+            const paramsUrlSingle = await _getParamsUrl(paramsPayloadSingle, dmProjectId, itemId, userToken);
             wiArguments = {
                 params:     { url: paramsUrlSingle,   verb: 'get', localName: 'params.json' },
                 inputFile:  { url: inputDownloadUrl,  verb: 'get', localName: 'input.rvt'   },
@@ -1393,7 +1454,8 @@ app.post('/api/da/submit', async (req, res) => {
         } else {
             // ── Workshared C4R cloud model: open via cloud GUIDs, sync with central ──────────
             const paramsPayload = { projectGuid, modelGuid, region: cloudRegion, changes, token: userToken };
-            const paramsUrl     = `data:application/json,${encodeURIComponent(JSON.stringify(paramsPayload))}`;
+            _step = 'prepare params';
+            const paramsUrl     = await _getParamsUrl(paramsPayload, dmProjectId, itemId, userToken);
             wiArguments = {
                 params:           { url: paramsUrl, verb: 'get', localName: 'params.json' },
                 // adsk3LeggedToken: plain access token string — the only format DA accepts.

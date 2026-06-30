@@ -43,16 +43,25 @@ async function graphqlRequest(query, variables = {}, region = null) {
     }
 }
 
-// Unified GraphQL query execution with automatic retry on 504
-async function executeGraphQLQuery(query, variables = {}, region = null, retries = 1) {
+// Unified GraphQL query execution with automatic retry on 504/502/503 and token-refresh on 401
+async function executeGraphQLQuery(query, variables = {}, region = null, retries = 3) {
+    let _tokenRefreshed = false;
     for (let attempt = 1; attempt <= retries; attempt++) {
         try {
             return await graphqlRequest(query, variables, region);
         } catch (error) {
-            const is504 = error.message.includes('504');
-            if (is504 && attempt < retries) {
-                const delay = attempt * 2000; // 2s, then 4s
-                logDebug(`504 timeout on attempt ${attempt}/${retries}, retrying in ${delay/1000}s...`);
+            const isTransient = /50[234]/.test(error.message) || error.message.includes('504');
+            const is401 = error.message.includes('401');
+            if (is401 && !_tokenRefreshed && sessionId) {
+                // Token expired — trigger server-side OAuth refresh, then retry once
+                _tokenRefreshed = true;
+                try { await fetch(`${API_BASE}/api/token/${sessionId}`); } catch (_) {}
+                attempt--;  // don't consume a retry slot for the token-refresh retry
+                continue;
+            }
+            if (isTransient && attempt < retries) {
+                const delay = Math.min(2000 * Math.pow(2, attempt - 1), 16000); // 2s, 4s, 8s …
+                logDebug(`HTTP transient error on attempt ${attempt}/${retries}, retrying in ${delay/1000}s…`);
                 await new Promise(resolve => setTimeout(resolve, delay));
             } else {
                 throw error;
@@ -98,6 +107,14 @@ async function loadHubsOld() {
     }
 }
 
+// Clears element-group ID caches so the next Execute Query fetches fresh
+// data from AEC DM (important after a new extraction is triggered).
+function resetAecElementGroupCaches() {
+    elementGroupIdCache.clear();
+    elementGroupBaseUrnCache.clear();
+    elementGroupCacheBuildPromise = null;
+}
+
 // ─── Project listing (Data Management API) ───────────────────────────────────
 
 async function selectHub(hub) {
@@ -108,9 +125,7 @@ async function selectHub(hub) {
     // Reset AEC DM caches — hub region may differ
     aecHubsCache = null;
     aecProjectIdCache.clear();
-    elementGroupIdCache.clear();
-    elementGroupBaseUrnCache.clear();
-    elementGroupCacheBuildPromise = null;
+    resetAecElementGroupCaches();
 
     const projectsList = document.getElementById('projectsList');
     projectsList.innerHTML = '<p style="color: #666;">Loading projects...</p>';
