@@ -1,27 +1,9 @@
-// ExecuteQuery.js – Phase 1: hub search, Revit file treemap, extraction status, compliance check
+// ExecuteQuery.js – Phase 1: hub search, Revit file treemap, compliance check
 
 // Shared state, utilities, and GraphQL query helpers used by ExploreParameters.js and UpdateRevit.js
 
 // AEC Data Model Query Examples
 
-// Show example function
-function showExample(exampleNumber) {
-    // Hide all examples
-    document.querySelectorAll('.example-content').forEach(el => {
-        el.classList.remove('active');
-    });
-    
-    // Remove active state from all nav items
-    document.querySelectorAll('.nav-item').forEach(el => {
-        el.classList.remove('active');
-    });
-    
-    // Show selected example
-    document.getElementById(`example${exampleNumber}`).classList.add('active');
-    
-    // Add active state to selected nav item
-    document.querySelectorAll('.nav-item')[exampleNumber - 1].classList.add('active');
-}
 
 // Copy query function
 function copyQuery(exampleNumber) {
@@ -217,7 +199,6 @@ async function executeExample1() {
     window._paramApiNameCache  = {};
     window._paramNamesPromises = {};
     window._paramTypeCache     = {};   // reset param type cache
-    window._egExtStatusCache   = new Map(); // reset extraction status dot cache
     resetAecElementGroupCaches();      // re-fetch element group IDs from AEC DM (catches new extractions)
     console.log(`[EQ-INIT] ══ Execute Query start ${new Date().toISOString()} ══`);
     const smBtn = document.getElementById('selectModeBtn');
@@ -450,34 +431,6 @@ async function executeLatestQuery(hubId, category, region) {
               egs = [...latest.values()];
             }
 
-            // ── Verify dedup result against the actual AEC DM tip ─────────────────
-            // elementGroupExtractionStatusAtTip is authoritative: if the dedup heuristic
-            // picked an older element group (e.g. new extraction has no ?version=N suffix),
-            // correct eg.id here so every downstream push uses the right egId.
-            {
-                const _tipQ = `query GetEGAtTipEQ($fileUrn: ID!, $accProjectId: ID!) {
-                    elementGroupExtractionStatusAtTip(fileUrn: $fileUrn, accProjectId: $accProjectId) {
-                        elementGroup { id }
-                    }
-                }`;
-                await Promise.all(egs.map(async eg => {
-                    if (!eg.fileUrn) { console.log(`[EQ-TIP] ${eg.name}: SKIP — fileUrn is null, dedup-egId=…${eg.id.slice(-15)}`); return; }
-                    console.log(`[EQ-TIP] ${eg.name}: calling AtTip | fileUrn=…${eg.fileUrn.slice(-30)} | accProjectId=…${project.id.slice(-30)} | dedup-egId=…${eg.id.slice(-15)}`);
-                    try {
-                        const _r = await executeGraphQLQuery(_tipQ, { fileUrn: eg.fileUrn, accProjectId: project.id }, region);
-                        const _tid = _r.data?.elementGroupExtractionStatusAtTip?.elementGroup?.id;
-                        if (_tid && _tid !== eg.id) {
-                            console.log(`[EQ tip-fix] ${eg.name}: dedup picked …${eg.id.slice(-10)} but tip is …${_tid.slice(-10)} — correcting`);
-                            eg.id = _tid;
-                        } else if (_tid) {
-                            console.log(`[EQ tip-fix] ${eg.name}: dedup egId confirmed correct (…${_tid.slice(-10)})`);
-                        } else {
-                            console.log(`[EQ tip-fix] ${eg.name}: AtTip returned no elementGroup — keeping dedup egId`);
-                        }
-                    } catch (_e) { console.warn(`[EQ tip-fix] ${eg.name}: AtTip failed — keeping dedup egId (${_e.message})`); }
-                }));
-            }
-
             totalFiles += egs.length;
 
             if (noCategory) {
@@ -605,31 +558,6 @@ async function executeV1Query(hubId, category, region) {
               console.log(`[EG dedup] SELECTED for "${eg.name}": id=${eg.id.slice(-10)}, ver=${ver(eg.fileVersionUrn)}, fileVersionUrn=${eg.fileVersionUrn || 'null'} (from ${counts.get(key)} candidates)`);
           }
           egs = [...latest.values()];
-        }
-
-        // ── Verify dedup result against the actual AEC DM tip ─────────────────
-        {
-            const _tipQ = `query GetEGAtTipEQ($fileUrn: ID!, $accProjectId: ID!) {
-                elementGroupExtractionStatusAtTip(fileUrn: $fileUrn, accProjectId: $accProjectId) {
-                    elementGroup { id }
-                }
-            }`;
-            await Promise.all(egs.map(async eg => {
-                if (!eg.fileUrn) { console.log(`[EQ-TIP] ${eg.name}: SKIP — fileUrn is null, dedup-egId=…${eg.id.slice(-15)}`); return; }
-                console.log(`[EQ-TIP] ${eg.name}: calling AtTip | fileUrn=…${eg.fileUrn.slice(-30)} | accProjectId=…${project.id.slice(-30)} | dedup-egId=…${eg.id.slice(-15)}`);
-                try {
-                    const _r = await executeGraphQLQuery(_tipQ, { fileUrn: eg.fileUrn, accProjectId: project.id }, region);
-                    const _tid = _r.data?.elementGroupExtractionStatusAtTip?.elementGroup?.id;
-                    if (_tid && _tid !== eg.id) {
-                        console.log(`[EQ tip-fix] ${eg.name}: dedup picked …${eg.id.slice(-10)} but tip is …${_tid.slice(-10)} — correcting`);
-                        eg.id = _tid;
-                    } else if (_tid) {
-                        console.log(`[EQ tip-fix] ${eg.name}: dedup egId confirmed correct (…${_tid.slice(-10)})`);
-                    } else {
-                        console.log(`[EQ tip-fix] ${eg.name}: AtTip returned no elementGroup — keeping dedup egId`);
-                    }
-                } catch (_e) { console.warn(`[EQ tip-fix] ${eg.name}: AtTip failed — keeping dedup egId (${_e.message})`); }
-            }));
         }
 
         totalFiles += egs.length;
@@ -791,41 +719,6 @@ async function fetchExample1Batch(autoPaginate = false) {
         }
     } finally {
         document.getElementById('example1Loading').style.display = 'none';
-    }
-}
-
-// Fetch AEC DM extraction status for each file tile and paint colored dots.
-// Green = SUCCESS, Orange = IN_PROGRESS/PENDING, grey = unknown.
-// Results cached in window._egExtStatusCache (reset per Execute Query).
-// Uses a generation counter (window._extStatusGen) so the fetch self-cancels
-// when the Parameter Explorer opens (openParameterExplorer bumps the counter).
-async function _fetchExtStatusForTreemap(files, region) {
-    if (!window._egExtStatusCache) window._egExtStatusCache = new Map();
-    const myGen = window._extStatusGen = (window._extStatusGen || 0) + 1;
-    const todo = files.filter(f => (f.fileUrn || f.fileVersionUrn) && f.projectId && !window._egExtStatusCache.has(f.egId));
-    if (!todo.length) return;
-    const BATCH = 4;
-    for (let i = 0; i < todo.length; i += BATCH) {
-        // Yield to other requests between batches (avoids flooding the API)
-        if (i > 0) await new Promise(r => setTimeout(r, 80));
-        // Stop if Parameter Explorer opened (it bumped the generation counter)
-        if (window._extStatusGen !== myGen) return;
-        await Promise.all(todo.slice(i, i + BATCH).map(async f => {
-            try {
-                const result = await _peFetchExtractionStatus(f, region);
-                const s = (result?.status || '').toUpperCase();
-                const dotStatus = s === 'SUCCESS' ? 'SUCCESS'
-                    : (s.includes('PROGRESS') || s.includes('PENDING')) ? 'IN_PROGRESS'
-                    : s || 'UNKNOWN';
-                window._egExtStatusCache.set(f.egId, dotStatus);
-                const fill = dotStatus === 'SUCCESS' ? '#4CAF50'
-                    : dotStatus === 'IN_PROGRESS' ? '#FF9800'
-                    : 'rgba(0,0,0,0.18)';
-                const cont = document.getElementById('example1Treemap');
-                if (cont) cont.querySelectorAll(`circle.ext-status-dot[data-egid="${CSS.escape(f.egId)}"]`)
-                    .forEach(c => c.setAttribute('fill', fill));
-            } catch (_) { window._egExtStatusCache.set(f.egId, 'UNKNOWN'); }
-        }));
     }
 }
 
@@ -1073,16 +966,6 @@ function createTreemapVisualization(fileSummary, category) {
                     .style('pointer-events', 'none');
             }
 
-            // Extraction status dot — top-right corner, updated async
-            const _dc = window._egExtStatusCache?.get(d.data.egId);
-            g.append('circle')
-                .attr('class', 'ext-status-dot')
-                .attr('cx', w - 7).attr('cy', 7)
-                .attr('r', 4.5)
-                .attr('fill', _dc === 'SUCCESS' ? '#4CAF50' : _dc === 'IN_PROGRESS' ? '#FF9800' : 'rgba(0,0,0,0.18)')
-                .attr('stroke', 'rgba(255,255,255,0.8)').attr('stroke-width', 1.5)
-                .attr('data-egid', d.data.egId)
-                .style('pointer-events', 'none');
         });
 
     container.appendChild(svg.node());
@@ -1121,9 +1004,6 @@ function createTreemapVisualization(fileSummary, category) {
     });
 
     createLegend(container, color, projectNames);
-
-    // Fetch extraction status and paint dots on all file tiles (fire-and-forget)
-    _fetchExtStatusForTreemap(files, example1State.region);
 
     // Show the search bar now that results are rendered
     const searchBar = document.getElementById('treemapSearchBar');

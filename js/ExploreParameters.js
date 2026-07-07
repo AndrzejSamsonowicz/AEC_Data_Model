@@ -924,71 +924,60 @@ function _pePicker_ZoomToType(typeName) {
 function _pePicker_DrawTypeZoom(typeName) {
     const area = document.getElementById('pePickerTreemapArea');
     if (!area) return;
-    const { width: W, height: H } = area.getBoundingClientRect();
-    if (W < 10 || H < 10) return;
 
-    const params   = (window._pePickerTypeGroups || new Map()).get(typeName) || [];
-    const selected = window._pePickerSelected || new Set();
-    const n        = window._pePickerNFiles || 1;
+    const params    = (window._pePickerTypeGroups || new Map()).get(typeName) || [];
+    const selected  = window._pePickerSelected || new Set();
+    const n         = window._pePickerNFiles || 1;
     const typeColor = _peTypeBadgeColor(typeName);
 
-    const hier = d3.hierarchy({ name: 'root', children: params.map(p => ({ name: p.name, value: Math.max(p.fileCount, 1), fileCount: p.fileCount })) })
-        .sum(d => d.value || 0);
-    d3.treemap().size([W, H]).padding(2).round(true)(hier);
+    // Alphabetical order
+    const sortedParams = [...params].sort((a, b) => a.name.localeCompare(b.name));
 
     area.innerHTML = '';
-    const svg = d3.select(area).append('svg').attr('width', W).attr('height', H);
-    const tw = d => d.x1 - d.x0;
-    const th = d => d.y1 - d.y0;
+    const list = document.createElement('div');
+    list.style.cssText = 'display:flex;flex-direction:column;gap:1px;overflow-y:auto;height:100%;padding:2px 0;';
 
-    const cells = svg.selectAll('g')
-        .data(hier.leaves()).join('g')
-        .attr('transform', d => `translate(${d.x0},${d.y0})`)
-        .attr('data-pname', d => d.data.name)
-        .style('cursor', 'pointer')
-        .on('click', (e, d) => _pePicker_ToggleParam(d.data.name));
+    sortedParams.forEach(p => {
+        const isSel = selected.has(p.name);
+        const row = document.createElement('div');
+        row.setAttribute('data-pname', p.name);
+        row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:4px;cursor:pointer;'
+            + 'border-left:3px solid ' + (isSel ? typeColor : 'transparent') + ';'
+            + 'background:' + (isSel ? '#dceefb' : 'transparent') + ';'
+            + "font-size:13px;font-family:'ArtifaktElement','Helvetica Neue',Arial,sans-serif;";
 
-    cells.append('rect')
-        .attr('width', tw).attr('height', th)
-        .attr('rx', 4).attr('ry', 4)
-        .attr('fill',         d => selected.has(d.data.name) ? '#dceefb' : '#f4f6f8')
-        .attr('stroke',       d => selected.has(d.data.name) ? typeColor  : '#d5dbe1')
-        .attr('stroke-width', d => selected.has(d.data.name) ? 2 : 1);
+        const label = document.createElement('span');
+        label.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'
+            + 'color:' + (isSel ? typeColor : '#3c3c3c') + ';'
+            + 'font-weight:' + (isSel ? '700' : '400') + ';';
+        label.textContent = p.name;
+        label.title = p.name;
+        row.appendChild(label);
 
-    cells.filter(d => tw(d) > 28 && th(d) > 18)
-        .append('text').attr('x', 6).attr('y', 15)
-        .attr('fill', d => selected.has(d.data.name) ? typeColor : '#3c3c3c')
-        .attr('font-size', d => Math.min(12, Math.max(9, Math.min(tw(d) / 9, 12))) + 'px')
-        .attr('font-weight', d => selected.has(d.data.name) ? '700' : '400')
-        .attr('font-family', "'ArtifaktElement','Helvetica Neue',Arial,sans-serif")
-        .style('pointer-events', 'none')
-        .each(function(d) {
-            const maxCh = Math.max(4, Math.floor(tw(d) / 6.5));
-            const nm = d.data.name;
-            d3.select(this).text(nm.length > maxCh ? nm.slice(0, maxCh - 1) + '\u2026' : nm);
+        if (n > 1) {
+            const fc = document.createElement('span');
+            fc.style.cssText = 'flex-shrink:0;font-size:11px;color:#aaa;';
+            fc.textContent = p.fileCount === n ? 'all' : p.fileCount + '/' + n;
+            row.appendChild(fc);
+        }
+
+        const check = document.createElement('span');
+        check.style.cssText = 'flex-shrink:0;width:16px;text-align:center;color:' + typeColor + ';font-weight:700;font-size:12px;';
+        check.textContent = isSel ? '\u2713' : '';
+        row.appendChild(check);
+
+        row.addEventListener('click', () => _pePicker_ToggleParam(p.name));
+        row.addEventListener('mouseenter', () => {
+            if (!window._pePickerSelected.has(p.name)) row.style.background = '#f0f4f8';
+        });
+        row.addEventListener('mouseleave', () => {
+            row.style.background = window._pePickerSelected.has(p.name) ? '#dceefb' : 'transparent';
         });
 
-    if (n > 1) {
-        cells.filter(d => tw(d) > 50 && th(d) > 30)
-            .append('text').attr('x', 6).attr('y', 27)
-            .attr('fill', '#999').attr('font-size', '9px')
-            .attr('font-family', "'ArtifaktElement','Helvetica Neue',Arial,sans-serif")
-            .style('pointer-events', 'none')
-            .text(d => d.data.fileCount === n ? 'all files' : `${d.data.fileCount}/${n} files`);
-    }
+        list.appendChild(row);
+    });
 
-    cells.filter(d => selected.has(d.data.name) && tw(d) > 18 && th(d) > 18)
-        .append('text').attr('x', d => tw(d) - 14).attr('y', 14)
-        .attr('fill', typeColor).attr('font-size', '11px')
-        .style('pointer-events', 'none').text('âœ“');
-
-    cells
-        .on('mouseenter', function(e, d) {
-            d3.select(this).select('rect').attr('fill', selected.has(d.data.name) ? '#c8e4f7' : '#eaecf0');
-        })
-        .on('mouseleave', function(e, d) {
-            d3.select(this).select('rect').attr('fill', selected.has(d.data.name) ? '#dceefb' : '#f4f6f8');
-        });
+    area.appendChild(list);
 }
 
 // â”€â”€ Picker selection helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1118,10 +1107,10 @@ function filterParamExplorerTreemap(query) {
         const area = document.getElementById('pePickerTreemapArea');
         if (area) {
             if (window._pePickerZoom) {
-                // In type-zoom: dim param tiles that don't match
-                area.querySelectorAll('g[data-pname]').forEach(g => {
-                    const name = (g.getAttribute('data-pname') || '').toLowerCase();
-                    g.style.opacity = (!term || name.includes(term)) ? '' : '0.1';
+                // In type-zoom list: dim rows that don't match
+                area.querySelectorAll('[data-pname]').forEach(row => {
+                    const name = (row.getAttribute('data-pname') || '').toLowerCase();
+                    row.style.opacity = (!term || name.includes(term)) ? '' : '0.15';
                 });
             } else {
                 // In type-overview: dim type tiles that don't match

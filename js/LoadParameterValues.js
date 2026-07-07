@@ -16,8 +16,10 @@ async function _peLoadCheckedValues(forceElementScan = true) {
     const searchInput = document.getElementById('paramExplorerSearch');
     const backBtn   = document.getElementById('paramExplorerBackBtn');
 
-    loading.style.display = 'none';   // keep overlay hidden \u2013 live treemap renders show progress
-    paramExplorerZoomState = null;
+    loading.style.display = 'none';   // keep overlay hidden – live treemap renders show progress
+    paramExplorerZoomState   = null;
+    window._peHiddenFiles    = new Set(); // reset file filter on each new load
+    window._peCategoryFilter = new Set(); // reset category filter on each new load
     if (searchInput) { searchInput.style.display = ''; searchInput.value = ''; }
     if (backBtn)     backBtn.style.display = 'none';
     const refreshBtnL = document.getElementById('paramExplorerRefreshBtn');
@@ -158,7 +160,8 @@ async function _peLoadCheckedValues(forceElementScan = true) {
             if (modal.style.display === 'none') return;
             if (window._paramExplorerAgg !== agg) return;
             scanCache[egId] = {};
-            scanCache[egId]._names = {}; // revitId → element name
+            scanCache[egId]._names      = {}; // revitId → element name
+            scanCache[egId]._categories = {}; // revitId → Revit category name
             const valueCounts = {}; // paramName → Map(value → count)
             for (const { paramName } of items) {
                 valueCounts[paramName] = new Map();
@@ -212,7 +215,8 @@ async function _peLoadCheckedValues(forceElementScan = true) {
                         if (_peIsNonGeometricCategory(_cat)) { _typeSkipped++; continue; }
                     }
                     _instanceKept++;
-                    scanCache[egId]._names[revitId] = el.name || '(unnamed)';
+                    scanCache[egId]._names[revitId]      = el.name || '(unnamed)';
+                    scanCache[egId]._categories[revitId] = props.find(p => p.name === 'Revit Category Type Id')?.value || '';
                     for (const { paramName, apiName, altName } of items) {
                         const prop = props.find(p => p.name === apiName || p.name === altName);
                         // Skip elements that don't have this parameter at all (e.g. Furniture
@@ -472,7 +476,8 @@ function paramExplorerZoomIn(paramName) {
     const agg = window._paramExplorerAgg;
     if (!agg || !agg.has(paramName)) return;
     paramExplorerZoomState = paramName;
-    window._peZoomSelected = new Set();  // clear tile selection on each zoom-in
+    window._peZoomSelected   = new Set();  // clear tile selection on each zoom-in
+    window._peCategoryFilter = new Set(); // clear category filter on each zoom-in
 
     const backBtn  = document.getElementById('paramExplorerBackBtn');
     const subtitle = document.getElementById('paramExplorerSubtitle');
@@ -771,8 +776,9 @@ function _peFilteredAgg() {
         byValue.forEach((entry, value) => {
             const visibleFiles = [...entry.files].filter(f => !hidden.has(f));
             if (visibleFiles.length > 0) {
+                const newCount = Math.round(entry.count * visibleFiles.length / Math.max(entry.files.size, 1));
                 filteredByValue.set(value, {
-                    count: entry.count,
+                    count: newCount || entry.count,
                     categories: entry.categories,
                     files: new Set(visibleFiles)
                 });
@@ -805,7 +811,7 @@ function _peBuildLegend(allFilesForLegend, fileColor) {
             'display:inline-flex', 'align-items:center', 'gap:4px',
             'cursor:pointer', 'padding:2px 8px 2px 5px',
             'border-radius:10px',
-            `border:1px solid ${isHidden ? '#ddd' : fileColor(f) + '66'}`,
+            `border:1px solid ${isHidden ? '#ddd' : fileColor(f) + '88'}`,
             `background:${isHidden ? '#f0f0f0' : 'white'}`,
             `opacity:${isHidden ? '0.45' : '1'}`,
             'transition:opacity .15s,border-color .15s',
@@ -1272,6 +1278,7 @@ async function _peBgCountSentinel(paramName, sentinelValue, byValue, container) 
 function _peBuildNameAgg(paramName) {
     const cache = window._peElementScanCache;
     if (!cache) return null;
+    const hidden = window._peHiddenFiles || new Set();
     const nameAgg = new Map();
     const allFiles = example1State.fileSummary || [];
     for (const egId of Object.keys(cache)) {
@@ -1279,16 +1286,20 @@ function _peBuildNameAgg(paramName) {
         if (!fileCache?.[paramName]) continue;
         const fileEntry = allFiles.find(f => f.egId === egId);
         const fileName = fileEntry?.egName || egId;
-        const names = fileCache._names || {};
+        if (hidden.has(fileName)) continue;
+        const names      = fileCache._names      || {};
+        const categories = fileCache._categories || {};
         for (const [value, revitIds] of Object.entries(fileCache[paramName])) {
             if (!Array.isArray(revitIds)) continue;
             for (const revitId of revitIds) {
-                const elName = names[revitId] || '(unnamed)';
-                if (!nameAgg.has(elName)) nameAgg.set(elName, { count: 0, files: new Set(), elements: [] });
+                const elName  = names[revitId]      || '(unnamed)';
+                const catName = categories[revitId] || '';
+                if (!nameAgg.has(elName)) nameAgg.set(elName, { count: 0, files: new Set(), categories: new Set(), elements: [] });
                 const grp = nameAgg.get(elName);
                 grp.count++;
                 grp.files.add(fileName);
-                grp.elements.push({ revitId, paramValue: value, egId, fileName });
+                if (catName) grp.categories.add(catName);
+                grp.elements.push({ revitId, paramValue: value, egId, fileName, category: catName });
             }
         }
     }
@@ -1301,7 +1312,14 @@ function _peRenderZoomNames(byValue, paramName, container, nameAgg) {
     window._peNameAgg = nameAgg;
     window._peZoomElementTiles = null;
 
-    const nameEntries = [...nameAgg.entries()].sort((a, b) => b[1].count - a[1].count);
+    const allNameEntries = [...nameAgg.entries()].sort((a, b) => b[1].count - a[1].count);
+
+    // ── Category filter ────────────────────────────────────────────────────────
+    const allCategories = [...new Set(allNameEntries.flatMap(([, g]) => [...(g.categories || [])]))].sort();
+    const selectedCats  = window._peCategoryFilter instanceof Set ? window._peCategoryFilter : new Set();
+    const nameEntries   = selectedCats.size > 0
+        ? allNameEntries.filter(([, g]) => [...(g.categories || [])].some(c => selectedCats.has(c)))
+        : allNameEntries;
 
     const allFilesForLegend = (() => {
         const src = window._paramExplorerAgg;
@@ -1311,7 +1329,115 @@ function _peRenderZoomNames(byValue, paramName, container, nameAgg) {
     const fileColor = d3.scaleOrdinal().domain(allFilesForLegend).range(_PE_PALETTE);
 
     container.innerHTML = '';
-    if (allFilesForLegend.length > 1) container.appendChild(_peBuildLegend(allFilesForLegend, fileColor));
+
+    // ── Combined filter bar: [Files | Categories] toggle + pills ────────────────
+    const _CAT_PALETTE = ['#78909c','#8d6e63','#66bb6a','#ffa726','#ab47bc','#42a5f5','#ef5350','#26a69a','#d4e157','#ff7043'];
+    const catColor     = d3.scaleOrdinal().domain(allCategories).range(_CAT_PALETTE);
+    const hasMultiFile = allFilesForLegend.length > 1;
+    const hasMultiCat  = allCategories.length > 1;
+    const showToggle   = hasMultiFile && hasMultiCat;
+    const activeMode   = showToggle ? (window._peColorBy || 'file') : (hasMultiFile ? 'file' : 'category');
+
+    if (hasMultiFile || hasMultiCat) {
+        const bar = document.createElement('div');
+        bar.style.cssText = [
+            'display:flex', 'flex-wrap:wrap', 'gap:5px',
+            'padding:5px 10px', 'background:#f5f5f5',
+            'border-bottom:1px solid #e0e0e0',
+            'font-size:11px', 'color:#333', 'align-items:center'
+        ].join(';');
+
+        if (showToggle) {
+            const seg = document.createElement('span');
+            seg.style.cssText = 'display:inline-flex;border-radius:6px;overflow:hidden;border:1px solid #bbb;flex-shrink:0;margin-right:4px;';
+            [['file','Files'],['category','Categories']].forEach(([val, label], i) => {
+                const btn = document.createElement('span');
+                const isOn = activeMode === val;
+                btn.style.cssText = [
+                    'padding:2px 10px', 'cursor:pointer',
+                    `background:${isOn ? '#555' : 'white'}`, `color:${isOn ? 'white' : '#777'}`,
+                    'font-size:10px', 'font-weight:600', 'user-select:none',
+                    ...(i === 0 ? ['border-right:1px solid #bbb'] : [])
+                ].join(';');
+                btn.textContent = label;
+                btn.addEventListener('click', () => {
+                    window._peColorBy = val;
+                    _peRenderZoomNames(byValue, paramName, container, nameAgg);
+                });
+                seg.appendChild(btn);
+            });
+            bar.appendChild(seg);
+        } else {
+            const lbl = document.createElement('span');
+            lbl.style.cssText = 'font-weight:600;color:#888;margin-right:4px;flex-shrink:0;font-size:10px;text-transform:uppercase;letter-spacing:.04em;';
+            lbl.textContent = activeMode === 'file' ? 'Filter files:' : 'Filter category:';
+            bar.appendChild(lbl);
+        }
+
+        if (activeMode === 'file') {
+            const hidden = window._peHiddenFiles || new Set();
+            allFilesForLegend.forEach(f => {
+                const isHidden = hidden.has(f);
+                const item = document.createElement('span');
+                item.title = isHidden ? `Click to show "${f}"` : `Click to hide "${f}"`;
+                item.style.cssText = [
+                    'display:inline-flex', 'align-items:center', 'gap:4px',
+                    'cursor:pointer', 'padding:2px 8px 2px 5px', 'border-radius:10px',
+                    `border:1px solid ${isHidden ? '#ddd' : fileColor(f) + '88'}`,
+                    `background:${isHidden ? '#f0f0f0' : 'white'}`,
+                    `opacity:${isHidden ? '0.45' : '1'}`,
+                    'transition:opacity .15s,border-color .15s', 'user-select:none'
+                ].join(';');
+                const sw = document.createElement('span');
+                sw.style.cssText = ['width:10px','height:10px','border-radius:2px',`background:${fileColor(f)}`,'display:inline-block','flex-shrink:0'].join(';');
+                const txt = document.createElement('span');
+                txt.style.cssText = isHidden ? 'text-decoration:line-through;color:#aaa;' : '';
+                txt.textContent = f;
+                item.appendChild(sw); item.appendChild(txt);
+                item.addEventListener('click', () => {
+                    if (!window._peHiddenFiles) window._peHiddenFiles = new Set();
+                    if (window._peHiddenFiles.has(f)) window._peHiddenFiles.delete(f);
+                    else window._peHiddenFiles.add(f);
+                    const cont = document.getElementById('paramExplorerTreemap');
+                    const filtAgg = _peFilteredAgg();
+                    if (paramExplorerZoomState) {
+                        const bv = (filtAgg || window._paramExplorerAgg)?.get(paramExplorerZoomState);
+                        const na = _peBuildNameAgg(paramExplorerZoomState);
+                        if (bv && na) _peRenderZoomNames(bv, paramExplorerZoomState, cont, na);
+                    } else _peRenderOverview(filtAgg || new Map(), cont, false);
+                });
+                bar.appendChild(item);
+            });
+        } else {
+            allCategories.forEach(cat => {
+                const isActive = selectedCats.size === 0 || selectedCats.has(cat);
+                const item = document.createElement('span');
+                item.title = selectedCats.has(cat) ? `Click to deselect "${cat}"` : `Click to filter by "${cat}"`;
+                item.style.cssText = [
+                    'display:inline-flex', 'align-items:center', 'gap:4px',
+                    'cursor:pointer', 'padding:2px 8px 2px 5px', 'border-radius:10px',
+                    `border:1px solid ${isActive ? catColor(cat) + '88' : '#ddd'}`,
+                    `background:${isActive ? 'white' : '#f0f0f0'}`,
+                    `opacity:${isActive ? '1' : '0.45'}`,
+                    'transition:opacity .15s,border-color .15s', 'user-select:none'
+                ].join(';');
+                const sw = document.createElement('span');
+                sw.style.cssText = ['width:10px','height:10px','border-radius:2px',`background:${catColor(cat)}`,'display:inline-block','flex-shrink:0'].join(';');
+                const txt = document.createElement('span');
+                txt.style.cssText = isActive ? '' : 'text-decoration:line-through;color:#aaa;';
+                txt.textContent = cat;
+                item.appendChild(sw); item.appendChild(txt);
+                item.addEventListener('click', () => {
+                    if (!(window._peCategoryFilter instanceof Set)) window._peCategoryFilter = new Set();
+                    if (window._peCategoryFilter.has(cat)) window._peCategoryFilter.delete(cat);
+                    else window._peCategoryFilter.add(cat);
+                    _peRenderZoomNames(byValue, paramName, container, nameAgg);
+                });
+                bar.appendChild(item);
+            });
+        }
+        container.appendChild(bar);
+    }
 
     const selBar = document.createElement('div');
     selBar.id = 'peZoomSelBar';
@@ -1328,7 +1454,8 @@ function _peRenderZoomNames(byValue, paramName, container, nameAgg) {
         name: paramName,
         children: nameEntries.map(([name, grp]) => ({
             name, value: Math.max(grp.count, 1), count: grp.count,
-            files: [...grp.files].sort()
+            files: [...grp.files].sort(),
+            categories: [...(grp.categories || [])].sort()
         }))
     };
 
@@ -1348,6 +1475,10 @@ function _peRenderZoomNames(byValue, paramName, container, nameAgg) {
         .attr('width',  d => Math.max(0, d.x1 - d.x0))
         .attr('height', d => Math.max(0, d.y1 - d.y0))
         .attr('fill', d => {
+            if (activeMode === 'category') {
+                const cats = d.data.categories || [];
+                return cats.length === 1 ? catColor(cats[0]) : '#9e9e9e';
+            }
             const fs = d.data.files || [];
             return allFilesForLegend.length > 1
                 ? (fs.length === 1 ? fileColor(fs[0]) : '#9e9e9e')
