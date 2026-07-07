@@ -99,6 +99,7 @@ function openViewerModal(elementGroups) {
     title.textContent = files.length > 1 ? `${files.length} models` : primary.name;
     loading.style.display = 'block';
     modal.classList.add('active');
+    _initSidebarResize();
 
     // Populate parameter edit panel with any pending selection
     populateParamEditPanel();
@@ -120,9 +121,13 @@ function closeViewerModal() {
     const modal = document.getElementById('viewerModal');
     modal.classList.remove('active');
     
-    // Remove viewer selection event listener
+    // Remove viewer selection event listeners
     if (viewer) {
         viewer.removeEventListener(Autodesk.Viewing.SELECTION_CHANGED_EVENT, handleViewerSelection);
+        if (Autodesk.Viewing.AGGREGATE_SELECTION_CHANGED_EVENT) {
+            viewer.removeEventListener(Autodesk.Viewing.AGGREGATE_SELECTION_CHANGED_EVENT, handleAggregateViewerSelection);
+        }
+        window._sidebarResizeInitialized = false;
     }
     
     // Unload all loaded models but keep viewer instance
@@ -137,9 +142,16 @@ function closeViewerModal() {
         currentLoadedFiles = [];
     }
 
-    // Hide the Show All button
+    // Exit reorder mode when the viewer closes.
+    if (window.ReorderController && typeof window.ReorderController.disable === 'function') {
+        window.ReorderController.disable();
+    }
+
+    // Hide the Show All / Zoom In buttons
     const showAllBtn = document.getElementById('viewerShowAllBtn');
     if (showAllBtn) showAllBtn.style.display = 'none';
+    const zoomBtn = document.getElementById('viewerZoomSelectedBtn');
+    if (zoomBtn) zoomBtn.style.display = 'none';
 }
 
 function viewerShowAll() {
@@ -149,6 +161,22 @@ function viewerShowAll() {
     models.forEach(m => viewer.clearThemingColors(m));
     const showAllBtn = document.getElementById('viewerShowAllBtn');
     if (showAllBtn) showAllBtn.style.display = 'none';
+    const zoomBtn = document.getElementById('viewerZoomSelectedBtn');
+    if (zoomBtn) zoomBtn.style.display = 'none';
+}
+
+function viewerZoomSelected() {
+    if (!viewer) return;
+    const aggSel = viewer.getAggregateSelection ? viewer.getAggregateSelection() : null;
+    if (aggSel && aggSel.length > 0) {
+        aggSel.forEach(function(sel) {
+            if (sel.selection && sel.selection.length > 0) {
+                viewer.fitToView(sel.selection, sel.model);
+            }
+        });
+    } else {
+        viewer.fitToView();
+    }
 }
 
 function loadModelsInViewer(viewerInstance, files) {
@@ -326,9 +354,11 @@ async function isolateByRevitIds(revitIds, category) {
         const red = new THREE.Vector4(1, 0, 0, 1);
         matchingDbIds.forEach(dbId => viewer.setThemingColor(dbId, red, modelRef));
         viewer.fitToView(matchingDbIds, modelRef);
-        // Show the "Show All" button in the viewer header
+        // Show the "Show All" / "Zoom In" buttons in the viewer header
         const showAllBtn = document.getElementById('viewerShowAllBtn');
         if (showAllBtn) showAllBtn.style.display = '';
+        const zoomBtn = document.getElementById('viewerZoomSelectedBtn');
+        if (zoomBtn) zoomBtn.style.display = '';
     } else {
         console.warn('⚠ No viewer objects matched. Dumping first 3 node property names for diagnosis:');
         // Diagnostic: log all property names from the first few scanned nodes
@@ -356,14 +386,8 @@ function highlightElementInViewer(dbId) {
     const red = new THREE.Vector4(1, 0, 0, 1); // RGBA: Red
     viewer.setThemingColor(dbId, red, model);
     
-    // Fit to view the highlighted element
-    viewer.fitToView([dbId], model);
-    
     // Also highlight in sidebar when clicking from list
     highlightElementInSidebar(dbId);
-    
-    // Display element properties in the properties panel
-    displayElementProperties(dbId);
     
     console.log(`✓ Highlighted element dbId ${dbId} in red`);
 }
@@ -464,19 +488,129 @@ function highlightElementInSidebar(dbId) {
     }
 }
 
+function _initSidebarResize() {
+    if (window._sidebarResizeInitialized) return;
+    const resizer = document.getElementById('viewerSidebarResizer');
+    const sidebar = document.querySelector('.viewer-sidebar');
+    if (!resizer || !sidebar) return;
+    window._sidebarResizeInitialized = true;
+    resizer.addEventListener('mousedown', function(e) {
+        e.preventDefault();
+        const startX = e.clientX;
+        const startW = sidebar.offsetWidth;
+        resizer.classList.add('dragging');
+        document.body.style.cursor = 'col-resize';
+        document.body.style.userSelect = 'none';
+        function onMove(me) {
+            const newW = Math.max(180, Math.min(620, startW + (me.clientX - startX)));
+            sidebar.style.width = newW + 'px';
+            // Tell Forge to recalculate its canvas size so hit-testing stays accurate
+            if (viewer && viewer.resize) viewer.resize();
+        }
+        function onUp() {
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+            resizer.classList.remove('dragging');
+            document.body.style.cursor = '';
+            document.body.style.userSelect = '';
+        }
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+    });
+}
+
+async function _peSyncTableFromViewerSelection() {
+    const rows = window._pendingParamEditRows;
+    if (!rows || rows.length === 0) return;
+    const tbody = document.getElementById('peParamTbody');
+    if (!tbody) return;
+    const st = window._peTableState;
+
+    // Get selection across all models (multi-model accurate)
+    const aggSel = viewer.getAggregateSelection ? viewer.getAggregateSelection() : null;
+    if (!aggSel || aggSel.length === 0) return;
+
+    const selectedRevitIds = new Set();
+
+    // For each model, fetch ElementId properties of its selected dbIds
+    await Promise.all(aggSel.map(function(sel) {
+        const selDbIds = sel.selection || sel.ids || [];
+        if (!selDbIds.length || !sel.model) return Promise.resolve();
+        return new Promise(function(resolve) {
+            sel.model.getBulkProperties(selDbIds, { propFilter: ['ElementId', 'Element ID', 'Element_ID', 'Revit Element ID'] }, function(results) {
+                results.forEach(function(result) {
+                    result.properties.forEach(function(p) {
+                        const nl = (p.displayName || '').toLowerCase();
+                        if (nl.includes('elementid') || nl.includes('element id') || nl.includes('element_id')) {
+                            const v = String(p.displayValue);
+                            if (v && v !== '0') selectedRevitIds.add(v);
+                        }
+                    });
+                });
+                resolve();
+            }, function() {
+                // propFilter failed (older viewer version) — retry without filter
+                sel.model.getBulkProperties(selDbIds, {}, function(results) {
+                    results.forEach(function(result) {
+                        result.properties.forEach(function(p) {
+                            const nl = (p.displayName || '').toLowerCase();
+                            if (nl.includes('elementid') || nl.includes('element id') || nl.includes('element_id')) {
+                                const v = String(p.displayValue);
+                                if (v && v !== '0') selectedRevitIds.add(v);
+                            }
+                        });
+                    });
+                    resolve();
+                }, resolve);
+            });
+        });
+    }));
+
+    if (selectedRevitIds.size === 0) return;
+
+    // Find matching row indices
+    const matchingIndices = [];
+    rows.forEach(function(row, i) {
+        if ((row.revitIds || []).some(function(r) { return selectedRevitIds.has(String(r)); })) {
+            matchingIndices.push(i);
+        }
+    });
+    if (matchingIndices.length === 0) return;
+
+    st.selected = new Set(matchingIndices);
+    st.cellSelected.clear();
+    st.lastClick = matchingIndices[0];
+    _peRefreshRowStyles();
+
+    // Scroll first match into view within the sidebar
+    const firstRow = tbody.querySelector('tr.pe-param-row[data-idx="' + matchingIndices[0] + '"]');
+    if (firstRow) firstRow.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
 function setupViewerToSidebarSync() {
     if (!viewer) return;
     
     // Remove any existing listeners to avoid duplicates
     viewer.removeEventListener(Autodesk.Viewing.SELECTION_CHANGED_EVENT, handleViewerSelection);
+    if (Autodesk.Viewing.AGGREGATE_SELECTION_CHANGED_EVENT) {
+        viewer.removeEventListener(Autodesk.Viewing.AGGREGATE_SELECTION_CHANGED_EVENT, handleAggregateViewerSelection);
+    }
     
-    // Add selection changed event listener
+    // Listen to both events — AGGREGATE fires in multi-model, SELECTION in single-model
     viewer.addEventListener(Autodesk.Viewing.SELECTION_CHANGED_EVENT, handleViewerSelection);
+    if (Autodesk.Viewing.AGGREGATE_SELECTION_CHANGED_EVENT) {
+        viewer.addEventListener(Autodesk.Viewing.AGGREGATE_SELECTION_CHANGED_EVENT, handleAggregateViewerSelection);
+    }
     
     console.log('✓ Viewer-to-sidebar sync enabled');
 }
 
 function handleViewerSelection(event) {
+    if (window.ReorderController && window.ReorderController.isEnabled && window.ReorderController.isEnabled()) {
+        window.ReorderController.onViewerSelection(event, false);
+        return;
+    }
+
     const dbIds = event.dbIdArray;
     
     if (dbIds && dbIds.length > 0) {
@@ -488,6 +622,9 @@ function handleViewerSelection(event) {
         
         // Highlight in sidebar (red background)
         highlightElementInSidebar(dbId);
+
+        // Sync Parameter Edit table rows using aggregate selection (model-accurate)
+        _peSyncTableFromViewerSelection();
     } else {
         // No selection - clear sidebar highlights
         const allItems = document.querySelectorAll('.element-list-item');
@@ -500,7 +637,26 @@ function handleViewerSelection(event) {
         if (viewer && viewer.model) {
             viewer.clearThemingColors();
         }
+
+        // Deselect all Parameter Edit table rows
+        const st = window._peTableState;
+        if (st && st.selected && st.selected.size > 0) {
+            st.selected.clear();
+            st.cellSelected.clear();
+            st.lastClick = -1;
+            _peRefreshRowStyles();
+        }
     }
+}
+
+// Fires in multi-model mode with aggregated selection across all models
+function handleAggregateViewerSelection(event) {
+    if (window.ReorderController && window.ReorderController.isEnabled && window.ReorderController.isEnabled()) {
+        window.ReorderController.onViewerSelection(event, true);
+        return;
+    }
+
+    _peSyncTableFromViewerSelection();
 }
 
 // ─── Parameter Edit Panel ─────────────────────────────────────────────────────
@@ -531,6 +687,7 @@ function populateParamEditPanel() {
     st.lastCellClick = -1;
     window._peRevitDbIdCache = null;   // clear scan cache whenever new rows are loaded
     window._peViewerRevitIds = null;    // clear viewer ID index so it rebuilds on next scan
+    window._peDbIdToRevitId  = null;    // clear reverse dbId→revitId map
     _peRenderParamTable(panel, rows);
 }
 
@@ -542,12 +699,12 @@ function _peRenderParamTable(panel, rows) {
 
     let html = '<div style="overflow-x:hidden;margin-bottom:2px;">';
     html += '<table id="peParamTable" style="width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed;font-family:\'ArtifaktElement\',\'Helvetica Neue\',Arial,sans-serif;">';
-    html += '<colgroup><col style="width:20px"><col style="width:35%"><col style="width:25%"><col></colgroup>';
+    html += '<colgroup><col id="peParamCol0" style="width:20px"><col id="peParamCol1" style="width:35%"><col id="peParamCol2" style="width:25%"><col id="peParamCol3"></colgroup>';
     html += '<thead><tr style="background:#0696d7;color:white;user-select:none;letter-spacing:0.01em;">';
     html += '<th style="padding:7px 3px;"></th>';
-    html += '<th style="padding:7px 6px;text-align:left;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;">Parameter</th>';
-    html += '<th style="padding:7px 6px;text-align:left;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;">Current</th>';
-    html += '<th style="padding:7px 6px;text-align:left;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;">New Value</th>';
+    html += '<th style="padding:7px 6px;text-align:left;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;position:relative;">Parameter<div class="pe-col-resize" style="position:absolute;right:0;top:0;width:5px;height:100%;cursor:col-resize;z-index:1;"></div></th>';
+    html += '<th style="padding:7px 6px;text-align:left;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;position:relative;">Current<div class="pe-col-resize" style="position:absolute;right:0;top:0;width:5px;height:100%;cursor:col-resize;z-index:1;"></div></th>';
+    html += '<th style="padding:7px 6px;text-align:left;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;position:relative;">New Value<div class="pe-col-resize" style="position:absolute;right:0;top:0;width:5px;height:100%;cursor:col-resize;z-index:1;"></div></th>';
     html += '</tr></thead>';
     html += '<tbody id="peParamTbody">';
     var lastFileName = null;
@@ -591,6 +748,7 @@ function _peRenderParamTable(panel, rows) {
     html += '<button onclick="applyParamChangesViaDA()" style="margin-top:10px;width:100%;padding:9px 16px;background:#0696d7;color:white;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:600;font-family:\'ArtifaktElement\',\'Helvetica Neue\',Arial,sans-serif;letter-spacing:0.01em;transition:background 0.15s;">' + btnLabel + '</button>';
     panel.innerHTML = html;
     _peBindTableEvents();
+    _peBindResizeHandles();
 }
 
 function _peBindTableEvents() {
@@ -750,6 +908,9 @@ function _peBindTableEvents() {
         }
         // Adjust insert position: how many dragged rows were before destIdx?
         var insertAt = destIdx - dragIndices.filter(function(i) { return i < destIdx; }).length;
+        // The drop indicator sits at the bottom of destIdx (= "insert after").
+        // When moving DOWN we must +1 so the row actually advances past destIdx.
+        if (destIdx > Math.max.apply(null, dragIndices)) insertAt++;
         insertAt = Math.max(0, Math.min(insertAt, rows.length));
         // Insert all dragged rows together
         dragged.forEach(function(r, k) { rows.splice(insertAt + k, 0, r); });
@@ -776,6 +937,40 @@ function _peBindTableEvents() {
 }
 
 function _peClearDragFlag() { _peDragHandleDown = false; }
+
+function _peBindResizeHandles() {
+    const table = document.getElementById('peParamTable');
+    if (!table) return;
+    const cols = table.querySelectorAll('col');
+    const handles = table.querySelectorAll('thead .pe-col-resize');
+    // handles[0] → col 1 (Parameter), handles[1] → col 2 (Current), handles[2] → col 3 (New Value)
+    handles.forEach(function(handle, i) {
+        const colIdx = i + 1; // skip col 0 (drag-handle column)
+        handle.addEventListener('mousedown', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            const col = cols[colIdx];
+            if (!col) return;
+            const th = handle.parentElement;
+            const startX = e.clientX;
+            const startW = th.offsetWidth;
+            document.body.style.cursor = 'col-resize';
+            document.body.style.userSelect = 'none';
+            function onMove(me) {
+                const newW = Math.max(40, startW + (me.clientX - startX));
+                col.style.width = newW + 'px';
+            }
+            function onUp() {
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+            }
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+        });
+    });
+}
 
 function _peRemapIndices(set, src, dst) {
     const out = new Set();
@@ -924,6 +1119,8 @@ function _peHighlightSelectedInViewer() {
             viewer.clearThemingColors();
             const btn = document.getElementById('viewerShowAllBtn');
             if (btn) btn.style.display = 'none';
+            const zoomBtn = document.getElementById('viewerZoomSelectedBtn');
+            if (zoomBtn) zoomBtn.style.display = 'none';
             return;
         }
 
@@ -1017,7 +1214,7 @@ async function _peBuildViewerRevitIds() {
 // for each model we count how many of its Revit Element IDs appear in the
 // pending rows for each egId — the egId with the most matches wins.
 // This avoids relying on JavaScript object identity or model load order.
-async function _peIsolateWithFocus(allPairs, focusPairs) {
+async function _peIsolateWithFocus(allPairs, focusPairs, focusColor, options) {
     // Clear debug log so this run is the only thing visible
     fetch(window.API_BASE + '/api/log/clear', { method: 'POST', headers: { 'Content-Type': 'application/json' } }).catch(() => {});
 
@@ -1122,9 +1319,25 @@ async function _peIsolateWithFocus(allPairs, focusPairs) {
     });
 
     var blue = new THREE.Vector4(0.35, 0.70, 1.0, 1);
+    var focusTint = focusColor || blue;
+    var keepScene = !!(options && options.keepScene);
+    var append = !!(options && options.append);
     // Isolating a non-existent dbId (-1) causes Forge Viewer to ghost ALL elements
     // in that model — used for models that have no focused element.
     var GHOST_ALL = [-1];
+
+    if (keepScene) {
+        if (!append) {
+            allModels.forEach(function(m) { viewer.clearThemingColors(m); });
+        }
+        focusEntries.forEach(function(e) {
+            viewer.setThemingColor(e.dbId, focusTint, e.model);
+        });
+        if (viewer.impl && typeof viewer.impl.invalidate === 'function') {
+            viewer.impl.invalidate(true, true, true);
+        }
+        return;
+    }
 
     allModels.forEach(function(m) { viewer.clearThemingColors(m); });
 
@@ -1136,7 +1349,7 @@ async function _peIsolateWithFocus(allPairs, focusPairs) {
         if (focusIds.length > 0) {
             viewer.isolate(focusIds, m);
             focusIds.forEach(function(dbId) {
-                viewer.setThemingColor(dbId, blue, m);
+                viewer.setThemingColor(dbId, focusTint, m);
             });
         } else {
             viewer.isolate(GHOST_ALL, m);  // ghost everything in this model
@@ -1145,6 +1358,8 @@ async function _peIsolateWithFocus(allPairs, focusPairs) {
 
     var btn = document.getElementById('viewerShowAllBtn');
     if (btn) btn.style.display = '';
+    var zoomBtn = document.getElementById('viewerZoomSelectedBtn');
+    if (zoomBtn) zoomBtn.style.display = '';
 }
 
 function _peEscapeHtml(s) {

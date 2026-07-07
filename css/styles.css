@@ -111,76 +111,6 @@ body {
     height: calc(100vh - 60px);
 }
 
-/* Examples Navigation */
-.examples-nav {
-    width: 280px;
-    background: white;
-    border-right: 1px solid #e0e0e0;
-    padding: 20px 0;
-    overflow-y: auto;
-}
-
-.examples-nav h3 {
-    padding: 12px 20px 12px;
-    color: #6a6a6a;
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    border-bottom: 1px solid #e8e8e8;
-    margin-bottom: 4px;
-    font-weight: 600;
-}
-
-.nav-item {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    padding: 10px 16px;
-    background: none;
-    border: none;
-    border-left: 3px solid transparent;
-    width: 100%;
-    text-align: left;
-    cursor: pointer;
-    transition: background-color 0.12s ease;
-    font-family: 'ArtifaktElement', 'Helvetica Neue', Arial, sans-serif;
-}
-
-.nav-item:hover {
-    background-color: #f2f4f6;
-}
-
-.nav-item.active {
-    background-color: #e6f4fb;
-    border-left-color: #0696d7;
-}
-
-.nav-number {
-    width: 24px;
-    height: 24px;
-    background: #0696d7;
-    color: white;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-weight: 600;
-    font-size: 12px;
-    flex-shrink: 0;
-    margin-top: 1px;
-}
-
-.nav-item.active .nav-number {
-    background: #0696d7;
-}
-
-.nav-text {
-    color: #3c3c3c;
-    font-size: 13px;
-    line-height: 1.4;
-    padding-top: 3px;
-}
-
 /* Content Area */
 .content-area {
     flex: 1;
@@ -1227,6 +1157,18 @@ body {
     overflow: hidden;
 }
 
+.viewer-resize-handle {
+    width: 5px;
+    background: #d5dbe1;
+    cursor: col-resize;
+    flex-shrink: 0;
+    transition: background 0.15s;
+}
+.viewer-resize-handle:hover,
+.viewer-resize-handle.dragging {
+    background: #0696d7;
+}
+
 .viewer-sidebar {
     width: 280px;
     background-color: #f4f7f9;
@@ -1364,6 +1306,122 @@ body {
     display: flex;
     justify-content: space-between;
     align-items: center;
+}
+
+.viewer-modal-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+#viewerReorderBtn.reorder-active {
+    background: #0696d7 !important;
+    border-color: #3db7ea !important;
+}
+
+.reorder-modal {
+    position: fixed;
+    top: 76px;
+    left: 24px;
+    width: 300px;
+    background: #ffffff;
+    border: 1px solid #cfd8e3;
+    border-radius: 8px;
+    box-shadow: 0 12px 28px rgba(10, 19, 28, 0.24);
+    z-index: 12000;
+    font-family: 'ArtifaktElement', 'Helvetica Neue', Arial, sans-serif;
+}
+
+.reorder-modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 10px;
+    background: #0a131c;
+    color: #fff;
+    border-radius: 8px 8px 0 0;
+    cursor: move;
+    user-select: none;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.reorder-modal-body {
+    padding: 10px;
+}
+
+.reorder-field {
+    margin-bottom: 8px;
+}
+
+.reorder-field label {
+    display: block;
+    font-size: 11px;
+    font-weight: 600;
+    color: #22313f;
+    margin-bottom: 3px;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+}
+
+.reorder-field input[type="text"],
+.reorder-field input[type="number"] {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 6px 8px;
+    border: 1px solid #bcc8d6;
+    border-radius: 4px;
+    font-size: 12px;
+}
+
+.reorder-checkbox-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: #2e3a45;
+    margin: 8px 0;
+}
+
+.reorder-preview {
+    margin-top: 6px;
+    background: #f5f9fc;
+    border: 1px solid #d7e4f0;
+    border-radius: 4px;
+    padding: 6px 8px;
+    font-size: 12px;
+    color: #1f2d3a;
+}
+
+.reorder-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+}
+
+.reorder-actions button {
+    flex: 1 1 120px;
+    padding: 7px 8px;
+    border: 1px solid #aebdcf;
+    background: #fff;
+    color: #1f2d3a;
+    border-radius: 4px;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.reorder-actions button.primary {
+    background: #0696d7;
+    border-color: #0696d7;
+    color: #fff;
+}
+
+.reorder-status {
+    font-size: 11px;
+    color: #5d6e7f;
+    margin-top: 8px;
+    min-height: 15px;
 }
 
 .viewer-modal-header h3 {

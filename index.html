@@ -29,19 +29,6 @@
     </div>
 
     <div class="main-layout">
-        <!-- Examples Navigation -->
-        <div class="examples-nav">
-            <h3>Query Examples</h3>
-            <button class="nav-item active" onclick="showExample(1)">
-                <div class="nav-number">1</div>
-                <div class="nav-text">Cross-Project Element Search</div>
-            </button>
-            <button class="nav-item" onclick="showExample(2)">
-                <div class="nav-number">2</div>
-                <div class="nav-text">Material Usage Analysis</div>
-            </button>
-        </div>
-
         <!-- Content Area -->
         <div class="content-area" id="mainContainer">
             <!-- Example 1: Cross-Portfolio Element Search -->
@@ -372,8 +359,12 @@ query CountEls($elementGroupId: ID!, $filter: ElementFilterInput, $pagination: P
     <div id="viewerModal" class="viewer-modal">
         <div class="viewer-modal-content">
             <div class="viewer-modal-header">
-                <h2 id="viewerModalTitle" style="margin: 0; color: white;">Model Viewer</h2>
-                <button id="viewerShowAllBtn" onclick="viewerShowAll()" style="display:none;padding:5px 14px;background:rgba(255,255,255,0.15);color:white;border:1px solid rgba(255,255,255,0.4);border-radius:4px;cursor:pointer;font-size:13px;font-weight:600;margin-right:8px;">&#128065; Show All</button>
+                <div class="viewer-modal-left">
+                    <h2 id="viewerModalTitle" style="margin: 0; color: white;">Model Viewer</h2>
+                    <button id="viewerReorderBtn" onclick="viewerReorder()" style="padding:5px 14px;background:rgba(255,255,255,0.15);color:white;border:1px solid rgba(255,255,255,0.4);border-radius:4px;cursor:pointer;font-size:13px;font-weight:600;">&#128256; Reorder</button>
+                    <button id="viewerShowAllBtn" onclick="viewerShowAll()" style="display:none;padding:5px 14px;background:rgba(255,255,255,0.15);color:white;border:1px solid rgba(255,255,255,0.4);border-radius:4px;cursor:pointer;font-size:13px;font-weight:600;">&#128065; Show All</button>
+                    <button id="viewerZoomSelectedBtn" onclick="viewerZoomSelected()" style="display:none;padding:5px 14px;background:rgba(255,255,255,0.15);color:white;border:1px solid rgba(255,255,255,0.4);border-radius:4px;cursor:pointer;font-size:13px;font-weight:600;">&#128269; Zoom In</button>
+                </div>
                 <button class="viewer-close-btn" onclick="closeViewerModal()">&times;</button>
             </div>
             <div class="viewer-body">
@@ -388,6 +379,7 @@ query CountEls($elementGroupId: ID!, $filter: ElementFilterInput, $pagination: P
                         </div>
                     </div>
                 </div>
+                <div id="viewerSidebarResizer" class="viewer-resize-handle"></div>
                 <div class="properties-panel" id="propertiesPanel">
                     <div class="properties-panel-header">
                         <span id="propertiesPanelTitle">Element Properties</span>
@@ -494,6 +486,7 @@ query CountEls($elementGroupId: ID!, $filter: ElementFilterInput, $pagination: P
     <script src="js/logging.js"></script>
     <script src="js/auth.js"></script>
     <script src="js/graphql.js"></script>
+    <script src="js/reorder.js"></script>
     <script src="js/viewer.js"></script>
     <script src="js/treemap.js"></script>
     <script src="js/ui.js"></script>
