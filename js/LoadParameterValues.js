@@ -1,5 +1,26 @@
 ﻿// LoadParameterValues.js – Phase 2: load parameter values and render treemaps
 
+function _peGetSelectedFilesSnapshot() {
+    const liveSelected = (typeof selectedEgIds !== 'undefined')
+        ? (example1State.fileSummary || []).filter(f => selectedEgIds.has(f.egId))
+        : [];
+    const snapshotSelected = Array.isArray(window._peSelectedFilesSnapshot)
+        ? window._peSelectedFilesSnapshot
+        : [];
+    if (typeof logTrace === 'function') {
+        logTrace('PE.snapshot', {
+            liveCount: liveSelected.length,
+            snapshotCount: snapshotSelected.length,
+            usingLive: liveSelected.length > 0,
+            liveIds: liveSelected.map(f => f.egId.slice(-12)),
+            snapshotIds: snapshotSelected.map(f => f.egId.slice(-12))
+        });
+    }
+    if (liveSelected.length > 0) return liveSelected;
+    if (snapshotSelected.length > 0) return snapshotSelected;
+    return liveSelected;
+}
+
 async function _peLoadCheckedValues(forceElementScan = true) {
     // Phase-1 picker (treemap) populates _pePickerSelected; fall back to legacy checkboxes
     const checked = (window._pePickerSelected && window._pePickerSelected.size > 0)
@@ -25,9 +46,20 @@ async function _peLoadCheckedValues(forceElementScan = true) {
     const refreshBtnL = document.getElementById('paramExplorerRefreshBtn');
     if (refreshBtnL)  refreshBtnL.style.display = 'none';
 
-    const selectedFiles = (example1State.fileSummary || []).filter(f => selectedEgIds.has(f.egId));
+    const selectedFiles = _peGetSelectedFilesSnapshot();
     const n = selectedFiles.length;
     const region = example1State.region;
+
+    if (typeof logTrace === 'function') {
+        logTrace('PE.load:start', {
+            checkedCount: checked.length,
+            selectedFiles: selectedFiles.map(f => ({ name: f.egName, egId: f.egId.slice(-12) })),
+            snapshotSize: Array.isArray(window._peSelectedFilesSnapshot) ? window._peSelectedFilesSnapshot.length : 0,
+            hasScanCache: !!window._peElementScanCache,
+            scanCompletedSize: window._peScanCompleted?.size ?? null,
+            forceElementScan
+        });
+    }
 
     // â”€â”€ Re-check extraction tip before loading values â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // If AEC DM has extracted a newer version of a file since the initial load,
@@ -465,10 +497,40 @@ async function _peLoadCheckedValues(forceElementScan = true) {
 }
 
 function closeParameterExplorer() {
+    if (typeof logTrace === 'function') {
+        logTrace('PE.close', {
+            hadAgg: !!window._paramExplorerAgg,
+            hadSnapshot: Array.isArray(window._peSelectedFilesSnapshot) && window._peSelectedFilesSnapshot.length > 0,
+            hadScanCache: !!window._peElementScanCache,
+            scanCompletedSize: window._peScanCompleted?.size ?? null,
+            pickerTypeGroups: !!window._pePickerTypeGroups,
+            zoomState: paramExplorerZoomState || null
+        });
+    }
     const modal = document.getElementById('paramExplorerModal');
     if (modal) modal.style.display = 'none';
     if (paramExplorerTooltip) paramExplorerTooltip.style.display = 'none';
     paramExplorerZoomState = null;
+    window._paramExplorerAgg = null;
+    window._peSelectedFilesSnapshot = null;
+    window._pePickerTypeGroups = null;
+    window._pePickerParamFileMap = null;
+    window._peLastChecklistState = null;
+    window._pePickerSelected = new Set();
+    window._pePickerZoom = null;
+    window._pePickerNFiles = 0;
+    window._peHiddenFiles = new Set();
+    window._peAllowedValues = [];
+    window._peParamAllowedValues = {};
+    window._peElementScanCache = null;
+    window._peScanCompleted = undefined;
+    window._peCategoryFilter = new Set();
+    window._peZoomSelected = new Set();
+    window._peNameAgg = null;
+    window._peZoomDrillName = null;
+    window._peZoomDrillParam = null;
+    window._peExpandedEmptyTiles = null;
+    window._peZoomElementTiles = null;
 }
 
 // â”€â”€ zoom in: click a parameter tile â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -486,7 +548,7 @@ function paramExplorerZoomIn(paramName) {
     const filtAgg  = _peFilteredAgg() || agg;
     const _zByValue = (filtAgg.get(paramName)) || agg.get(paramName);
     const _zParamFiles = new Set([..._zByValue.values()].flatMap(e => [...e.files]));
-    const _zTotalFiles = (example1State.fileSummary || []).filter(f => selectedEgIds.has(f.egId)).length;
+    const _zTotalFiles = _peGetSelectedFilesSnapshot().length;
     const _zFileSuffix = _zTotalFiles > 1 ? `  \u00b7  found in ${_zParamFiles.size} of ${_zTotalFiles} files` : '';
     if (subtitle) subtitle.textContent  = `${paramName}${_zFileSuffix}`;
     if (search)   search.value = '';
@@ -503,7 +565,7 @@ function paramExplorerZoomOut() {
     if (backBtn)  backBtn.style.display = 'none';
     if (search)   search.value = '';
     if (subtitle && agg) {
-        const n = (example1State.fileSummary || []).filter(f => selectedEgIds.has(f.egId)).length;
+        const n = _peGetSelectedFilesSnapshot().length;
         subtitle.textContent = `${n} file${n !== 1 ? 's' : ''} \u00b7 ${agg.size} parameters`;
     }
     if (agg) _peRenderOverview(_peFilteredAgg() || agg, document.getElementById('paramExplorerTreemap'), false);
@@ -920,7 +982,7 @@ function _peRenderOverview(agg, container, isLive) {
         if (!src) return allFiles;
         return [...new Set([...src.values()].flatMap(bv => [...bv.values()].flatMap(e => [...e.files])))].sort();
     })();
-    const totalSelectedFiles = (example1State.fileSummary || []).filter(f => selectedEgIds.has(f.egId)).length;
+    const totalSelectedFiles = _peGetSelectedFilesSnapshot().length;
     const fileColor = d3.scaleOrdinal().domain(allFilesForLegend).range(_PE_PALETTE);
 
     const width   = Math.max(600, (container.clientWidth  || 1100) - 4);
@@ -1240,7 +1302,7 @@ async function _peBgCountSentinel(paramName, sentinelValue, byValue, container) 
     let totalCount = 0;
     try {
         for (const fileName of entry.files) {
-            const fc = (example1State.fileSummary || []).find(f => selectedEgIds.has(f.egId) && f.egName === fileName);
+            const fc = _peGetSelectedFilesSnapshot().find(f => f.egName === fileName);
             if (!fc) continue;
             const an = (window._paramApiNameCache[fc.egId]?.get(paramName)) || paramName;
             let cursor = null;
@@ -1797,7 +1859,7 @@ function _peRenderZoom(byValue, paramName, container) {
         if (!src) return allFiles;
         return [...new Set([...src.values()].flatMap(bv => [...bv.values()].flatMap(e => [...e.files])))].sort();
     })();
-    const totalSelectedFiles = (example1State.fileSummary || []).filter(f => selectedEgIds.has(f.egId)).length;
+    const totalSelectedFiles = _peGetSelectedFilesSnapshot().length;
     const fileColor  = d3.scaleOrdinal().domain(allFilesForLegend).range(_PE_PALETTE);
     const colorDomain = [...new Set(displayValues.map(v => v._parentKey || v.value))];
     const valueColor = d3.scaleOrdinal().domain(colorDomain).range(_PE_PALETTE);

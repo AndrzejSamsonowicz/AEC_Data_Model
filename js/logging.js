@@ -22,7 +22,7 @@
         return SUPPRESS_PATTERNS.some(p => p.test(str));
     }
 
-    function sendLogToServer(level, args) {
+    function sendLogToServer(level, args, context = null) {
         if (shouldSuppress(args)) return;
         const message = args.map(arg => {
             if (arg instanceof Error) {
@@ -42,9 +42,10 @@
         fetch(`${API_BASE}/api/log`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ 
-                level, 
+            body: JSON.stringify({
+                level,
                 message,
+                context,
                 timestamp: new Date().toISOString()
             })
         }).catch(() => {}); // Silently fail if logging fails
@@ -86,6 +87,10 @@
         sendLogToServer('error', [`Unhandled Promise Rejection: ${event.reason}`]);
     });
 
+    window.logTrace = window.logTrace || function(scope, ...args) {
+        console.debug(`[TRACE:${scope}]`, ...args);
+    };
+
     console.log('Auto-logging to debug.log enabled');
 })();
 
@@ -105,6 +110,10 @@
 // Logging helper functions
 function logDebug(...args) {
     console.log('[DEBUG]', ...args);
+}
+
+function logTrace(scope, ...args) {
+    console.debug(`[TRACE:${scope}]`, ...args);
 }
 
 function logError(...args) {

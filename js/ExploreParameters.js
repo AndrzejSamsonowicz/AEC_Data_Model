@@ -680,14 +680,34 @@ async function openParameterExplorer() {
     const refreshBtn0 = document.getElementById('paramExplorerRefreshBtn');
     if (refreshBtn0)  refreshBtn0.style.display = 'none';
 
+    logTrace('PE.open:start', {
+        selectedEgIdsSize: selectedEgIds.size,
+        snapshotSize: Array.isArray(window._peSelectedFilesSnapshot) ? window._peSelectedFilesSnapshot.length : 0,
+        hasActiveAgg: !!window._paramExplorerAgg,
+        hasScanCache: !!window._peElementScanCache,
+        scanCompletedSize: window._peScanCompleted?.size ?? null
+    });
+
     // Cancel any in-progress extraction-status background fetch so it stops
     // competing with param-name API calls (avoids rate-limiting / 60s timeouts).
     window._extStatusGen = (window._extStatusGen || 0) + 1;
 
     const selectedFiles = (example1State.fileSummary || []).filter(f => selectedEgIds.has(f.egId));
     const n = selectedFiles.length;
-    console.log(`[PE-OPEN] selectedEgIds=[${[...selectedEgIds].map(id=>id.slice(-12)).join(',')}] → ${n} file(s): [${selectedFiles.map(f=>`${f.egName}=\u2026${f.egId.slice(-12)}`).join(', ')}]`);
+    logTrace('PE.open:selectedFiles', {
+        selectedEgIds: [...selectedEgIds].map(id => id.slice(-12)),
+        selectedFiles: selectedFiles.map(f => ({ name: f.egName, egId: f.egId.slice(-12), urn: !!f.fileUrn })),
+        count: n
+    });
     subtitle.textContent = `${n} file${n !== 1 ? 's' : ''} \u2013 collecting parameter names\u2026`;
+
+    window._peSelectedFilesSnapshot = selectedFiles;
+    selectedEgIds.clear();
+    logTrace('PE.open:afterClear', {
+        selectedEgIdsSize: selectedEgIds.size,
+        snapshotSize: window._peSelectedFilesSnapshot.length
+    });
+    if (typeof updateViewerButton === 'function') updateViewerButton();
 
     const region = example1State.region;
 
@@ -710,9 +730,7 @@ async function openParameterExplorer() {
             const tipEgId = r.data?.elementGroupExtractionStatusAtTip?.elementGroup?.id;
             if (tipEgId && tipEgId !== f.egId) {
                 console.log(`[PE tip-fix] ${f.egName}: replacing stale egId \u2026${f.egId.slice(-10)} → \u2026${tipEgId.slice(-10)}`);
-                selectedEgIds.delete(f.egId);  // keep selectedEgIds in sync so _peLoadCheckedValues can still find this file
                 f.egId = tipEgId;
-                selectedEgIds.add(tipEgId);
             } else if (tipEgId) {
                 console.log(`[PE tip-fix] ${f.egName}: egId confirmed correct (\u2026${tipEgId.slice(-10)}, ${f.fileVersionUrn || 'ver?'})`);
             } else {

@@ -1226,6 +1226,10 @@ function showSelectionInViewer() {
     pendingCategoryHighlight = example1State.category;
     currentRegion = example1State.region; // ensure viewer knows the region
     openViewerModal(files);
+
+    // The selection was only needed to open the viewer. Clear it now so returning
+    // to the treemap starts from a clean overview instead of the previous subset.
+    clearTreemapSelection();
 }
 
 // ─── Example 1: Compliance Check (Hub-Level) ─────────────────────────────────

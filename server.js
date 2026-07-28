@@ -304,11 +304,12 @@ app.post('/api/token', async (req, res) => {
 
 // Debug logging endpoint
 app.post('/api/log', (req, res) => {
-    const { level, message, timestamp } = req.body;
+    const { level, message, timestamp, context } = req.body;
     
     // Use provided timestamp or current time if not provided
     const logTime = timestamp ? new Date(timestamp).toISOString() : new Date().toISOString();
-    const logEntry = `[${logTime}] [${level.toUpperCase()}] ${message}\n`;
+    const contextText = context ? ` ${JSON.stringify(context)}` : '';
+    const logEntry = `[${logTime}] [${level.toUpperCase()}] ${message}${contextText}\n`;
     
     // Append to debug.log file
     fs.appendFile(path.join(__dirname, 'debug.log'), logEntry, (err) => {

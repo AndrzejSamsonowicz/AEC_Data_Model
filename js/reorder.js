@@ -227,7 +227,8 @@
         var ids = (revitIds || []).map(function (r) { return String(r); });
         if (!ids.length) return Promise.resolve(false);
 
-        // Reuse the same viewer pipeline that colors selected rows blue from the list.
+        // Use the shared focus pipeline so the viewer cache is reused and
+        // already-assigned rows keep their green colour without re-isolating.
         if (typeof window._peIsolateWithFocus === 'function') {
             var rows = window._pendingParamEditRows || [];
             var allPairs = [];
@@ -239,7 +240,7 @@
                 r.revitIds.forEach(function (rid) {
                     allPairs.push({ revitId: String(rid), egId: egId });
                 });
-                // Keep all already-assigned rows focused so they remain visibly colored.
+                // Keep all already-assigned rows visibly coloured.
                 if (typeof r.__reorderOrdinal === 'number') {
                     r.revitIds.forEach(function (rid) {
                         focusPairs.push({ revitId: String(rid), egId: egId });
@@ -247,7 +248,7 @@
                 }
             });
 
-            // Ensure current ids are always in focus set.
+            // Ensure current ids are always in the focus set.
             ids.forEach(function (rid) {
                 focusPairs.push({ revitId: rid, egId: '' });
             });
@@ -600,9 +601,6 @@
                 return rowMatchesRevitId(rows[idx], revitId);
             });
             if (matchInSelected !== undefined) return matchInSelected;
-
-            if (selected.indexOf(state.activeRowIndex) >= 0) return state.activeRowIndex;
-            return selected[0];
         }
 
         if (revitId) {
@@ -611,8 +609,7 @@
             }
         }
 
-        if (state.activeRowIndex >= 0 && rows[state.activeRowIndex]) return state.activeRowIndex;
-        return rows.length ? 0 : -1;
+        return -1;
     }
 
     function advanceTarget(rows) {
@@ -732,6 +729,12 @@
             return;
         }
 
+        // Theme the picked object immediately so the user gets visible feedback
+        // even before the Revit-ID lookup / row coloring finishes.
+        (picksToColor || [pick]).forEach(function (p) {
+            colorPickedElement(p.model, p.dbId);
+        });
+
         resolveRevitId(pick.model, pick.dbId).then(function (revitId) {
             var targetIdx = pickTargetRowIndex(rows, revitId);
             if (targetIdx < 0 || !rows[targetIdx]) {
@@ -802,6 +805,11 @@
         state.enabled = false;
         state.activeRowIndex = -1;
         state.colorEpoch += 1; // cancel any pending delayed recolor callbacks
+        state.lastPickKey = '';
+        state.lastPickAt = 0;
+        state.pickedEntries.clear();
+        resetRevitColorCache();
+        state.dbIdToRevitId = new Map();
         if (window.viewer) {
             clearViewerHighlights();
             if (typeof viewer.clearSelection === 'function') {
@@ -819,8 +827,15 @@
     function onViewerSelection(event, isAggregate) {
         if (!state.enabled) return;
         applyViewerSelectionColor();
-        colorCurrentSelectionNow();
         var picks = getPickEntries(event, !!isAggregate);
+        // Color directly from event payload so the picked element turns green
+        // even when viewer.getSelection()/getAggregateSelection lags this event tick.
+        picks.forEach(function (p) {
+            colorPickedElement(p.model, p.dbId);
+        });
+        // Keep the previous path as fallback for viewer implementations that may
+        // not include all ids in the event payload.
+        colorCurrentSelectionNow();
         var pick = extractPick(event, !!isAggregate);
         if (!pick) return;
         if (isDuplicatePick(pick)) return;

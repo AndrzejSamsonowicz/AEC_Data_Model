@@ -29,7 +29,34 @@ async function getViewerToken(callback) {
 function initializeViewer() {
     return new Promise((resolve, reject) => {
         if (viewer) {
-            resolve(viewer);
+            // Reusing an existing viewer can keep a stale access token.
+            // Refresh token before loading more models to avoid 401 on URN fetch.
+            let settled = false;
+            const finish = () => {
+                if (settled) return;
+                settled = true;
+                resolve(viewer);
+            };
+
+            try {
+                getViewerToken((token, expiresIn) => {
+                    try {
+                        if (typeof viewer.setAccessToken === 'function') {
+                            viewer.setAccessToken(token, expiresIn);
+                            console.log('Viewer token refreshed for existing instance');
+                        }
+                    } catch (e) {
+                        console.warn('Failed to set refreshed viewer token:', e.message);
+                    }
+                    finish();
+                });
+            } catch (e) {
+                console.warn('Token refresh attempt failed before model load:', e.message);
+                finish();
+            }
+
+            // Fallback: never block loading forever if token callback does not fire.
+            setTimeout(finish, 1200);
             return;
         }
 
@@ -104,6 +131,12 @@ function openViewerModal(elementGroups) {
     // Populate parameter edit panel with any pending selection
     populateParamEditPanel();
 
+    // Ensure keyboard handler is attached at capture phase before viewer tools.
+    window.removeEventListener('keydown', _peKeyHandler, true);
+    window.addEventListener('keydown', _peKeyHandler, true);
+    document.removeEventListener('keydown', _peKeyHandler, true);
+    document.addEventListener('keydown', _peKeyHandler, true);
+
     // Initialize and load model(s)
     initializeViewer()
         .then((viewerInstance) => {
@@ -146,6 +179,20 @@ function closeViewerModal() {
     if (window.ReorderController && typeof window.ReorderController.disable === 'function') {
         window.ReorderController.disable();
     }
+
+    window._pendingParamEditRows = [];
+    window._pendingDAFileContexts = null;
+    window._pendingDAFileContext = null;
+    window._peRevitDbIdCache = null;    // prevent stale model cache from filtering next Parameter Explorer scan
+
+    // Clear treemap multi-select state so the next run starts from a clean slate.
+    if (typeof window.clearTreemapSelection === 'function') {
+        window.clearTreemapSelection();
+    }
+
+    // Cleanup keyboard handler when modal closes.
+    window.removeEventListener('keydown', _peKeyHandler, true);
+    document.removeEventListener('keydown', _peKeyHandler, true);
 
     // Hide the Show All / Zoom In buttons
     const showAllBtn = document.getElementById('viewerShowAllBtn');
@@ -675,6 +722,18 @@ function populateParamEditPanel() {
     const panel = document.getElementById('paramEditPanel');
     if (!panel) return;
     const rows = window._pendingParamEditRows || [];
+    if (typeof logTrace === 'function') {
+        logTrace('PE.viewer:populate', {
+            rowCount: rows.length,
+            fileCount: [...new Set(rows.map(r => r.fileContext?.fileName).filter(Boolean))].length,
+            sampleRows: rows.slice(0, 5).map(r => ({
+                paramName: r.paramName,
+                currentValue: r.currentValue,
+                egId: r.fileContext?.egId ? String(r.fileContext.egId).slice(-12) : null,
+                revitIds: Array.isArray(r.revitIds) ? r.revitIds.length : 0
+            }))
+        });
+    }
     if (rows.length === 0) {
         panel.innerHTML = '<div style="padding:4px 0 12px;color:#888;font-size:12px;line-height:1.5;">Select parameters in the treemap and click \u201cShow in Viewer \u25ba\u201d to populate this panel.</div>';
         return;
@@ -932,8 +991,10 @@ function _peBindTableEvents() {
     document.addEventListener('mouseup', _peClearDragFlag);
 
     // ── Keyboard Ctrl+C: copy New Value column selection ────────────────────
-    document.removeEventListener('keydown', _peKeyHandler);
-    document.addEventListener('keydown', _peKeyHandler);
+    window.removeEventListener('keydown', _peKeyHandler, true);
+    window.addEventListener('keydown', _peKeyHandler, true);
+    document.removeEventListener('keydown', _peKeyHandler, true);
+    document.addEventListener('keydown', _peKeyHandler, true);
 }
 
 function _peClearDragFlag() { _peDragHandleDown = false; }
@@ -990,9 +1051,51 @@ function _peRemapIndices(set, src, dst) {
 function _peKeyHandler(e) {
     // Auto-remove when panel is gone
     if (!document.getElementById('peParamTbody')) {
-        document.removeEventListener('keydown', _peKeyHandler);
+        window.removeEventListener('keydown', _peKeyHandler, true);
+        document.removeEventListener('keydown', _peKeyHandler, true);
         return;
     }
+
+    // ArrowUp/ArrowDown move the selected row in the left pane and update
+    // viewer highlight without triggering viewer navigation tools.
+    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        var target = e.target;
+        if (!(target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/i.test(target.tagName)))) {
+            var rowsNav = window._pendingParamEditRows || [];
+            var stNav = window._peTableState;
+            if (rowsNav.length && stNav) {
+                e.preventDefault();
+                e.stopPropagation();
+                if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+
+                var selected = stNav.selected ? Array.from(stNav.selected).sort(function(a, b) { return a - b; }) : [];
+                var idx = selected.length ? selected[selected.length - 1] : -1;
+
+                if (e.key === 'ArrowUp') {
+                    if (idx < 0) idx = rowsNav.length;
+                    idx = Math.max(0, idx - 1);
+                } else {
+                    if (idx < 0) idx = -1;
+                    idx = Math.min(rowsNav.length - 1, idx + 1);
+                }
+
+                stNav.selected = new Set([idx]);
+                stNav.cellSelected.clear();
+                stNav.lastClick = idx;
+                stNav.lastCellClick = -1;
+                if (typeof window._peRefreshRowStyles === 'function') window._peRefreshRowStyles();
+
+                var rowEl = document.querySelector('#peParamTbody tr.pe-param-row[data-idx="' + idx + '"]');
+                if (rowEl) rowEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+                if (typeof window._peHighlightSelectedInViewer === 'function') {
+                    window._peHighlightSelectedInViewer();
+                }
+            }
+            return;
+        }
+    }
+
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') {
         const st = window._peTableState;
         if (st.cellSelected.size === 0) return;
@@ -1114,6 +1217,21 @@ function _peHighlightSelectedInViewer() {
         const st     = window._peTableState;
         const rows   = window._pendingParamEditRows || [];
 
+        if (typeof logTrace === 'function') {
+            logTrace('PE.viewer:highlight:start', {
+                rowCount: rows.length,
+                selectedIndices: [...st.selected],
+                lastClick: st.lastClick,
+                selectedRows: [...st.selected].map(i => rows[i] ? {
+                    idx: i,
+                    paramName: rows[i].paramName,
+                    currentValue: rows[i].currentValue,
+                    egId: rows[i].fileContext?.egId ? String(rows[i].fileContext.egId).slice(-12) : null,
+                    revitIds: Array.isArray(rows[i].revitIds) ? rows[i].revitIds.length : 0
+                } : null).filter(Boolean)
+            });
+        }
+
         if (st.selected.size === 0) {
             viewer.showAll();
             viewer.clearThemingColors();
@@ -1143,6 +1261,14 @@ function _peHighlightSelectedInViewer() {
         if (focusPairs.length === 0) {
             console.warn('No Revit IDs for selected row(s) — cannot highlight.');
             return;
+        }
+        if (typeof logTrace === 'function') {
+            logTrace('PE.viewer:highlight:pairs', {
+                allPairs: allPairs.length,
+                focusPairs: focusPairs.length,
+                uniqueAllKeys: new Set(allPairs.map(p => `${p.egId}::${p.revitId}`)).size,
+                uniqueFocusKeys: new Set(focusPairs.map(p => `${p.egId}::${p.revitId}`)).size
+            });
         }
         try { await _peIsolateWithFocus(allPairs, focusPairs); }
         catch(e) { console.warn('Row highlight failed:', e.message); }
