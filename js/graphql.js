@@ -2,16 +2,58 @@
 
 // ─── GraphQL helper (used for element parameter queries only) ───────────────
 
-async function graphqlRequest(query, variables = {}, region = null) {
+// Request pool: the browser only opens ~6 connections to localhost:3000, shared by every
+// fetch (GraphQL, logs, tokens). Unbounded parallel calls just queue inside the browser, in
+// no particular order. This pool caps GraphQL calls at GQL_MAX_CONCURRENT (leaving a lane
+// free for everything else) and lets calls the user is waiting on jump ahead of background
+// work (opts.background, e.g. warming parameter names for files selected in the treemap).
+const GQL_MAX_CONCURRENT = 5;
+const _gqlQueue = { foreground: [], background: [] };
+let _gqlActive = 0;
+
+function _gqlPump() {
+    while (_gqlActive < GQL_MAX_CONCURRENT && (_gqlQueue.foreground.length || _gqlQueue.background.length)) {
+        _gqlActive++;
+        (_gqlQueue.foreground.shift() || _gqlQueue.background.shift())();
+    }
+}
+
+function _gqlAcquireSlot(background) {
+    return new Promise(resolve => {
+        _gqlQueue[background ? 'background' : 'foreground'].push(resolve);
+        _gqlPump();
+    });
+}
+
+function _gqlReleaseSlot() {
+    _gqlActive--;
+    _gqlPump();
+}
+
+function _gqlOpName(query) {
+    const m = /\b(?:query|mutation)\s+(\w+)/.exec(query || '');
+    return m ? m[1] : 'query';
+}
+
+// opts.background: true → waits behind foreground calls in the pool.
+//                  A function is re-checked when the slot is requested, so a background
+//                  job can be promoted while it runs (see _prefetchParamNames).
+async function graphqlRequest(query, variables = {}, region = null, opts = {}) {
     if (!sessionId) {
         console.error('graphqlRequest called without sessionId!');
         throw new Error('Not logged in');
     }
 
-    console.log(`GraphQL Request - Region: ${region}, Variables:`, variables);
+    const perfHandle = window.Perf ? window.Perf.callStart(query) : null;
+    const perfInfo = { ok: false, status: 0, bytes: 0 };
+    const background = typeof opts.background === 'function' ? !!opts.background() : !!opts.background;
+    await _gqlAcquireSlot(background);
+    if (perfHandle) window.Perf.callAcquired(perfHandle);
 
+    // Timeout starts once the call leaves the pool, so time spent queued doesn't count.
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s client-side timeout
+    const started = performance.now();
 
     try {
         const response = await fetch(`${API_BASE}/api/graphql`, {
@@ -21,18 +63,29 @@ async function graphqlRequest(query, variables = {}, region = null) {
             signal: controller.signal
         });
         clearTimeout(timeoutId);
+        perfInfo.status = response.status;
+        perfInfo.apsMs = parseFloat(response.headers.get('X-APS-Ms'));
+        perfInfo.serverMs = parseFloat(response.headers.get('X-Proxy-Ms'));
+        if (isNaN(perfInfo.apsMs)) delete perfInfo.apsMs;
+        if (isNaN(perfInfo.serverMs)) delete perfInfo.serverMs;
+
+        const bodyText = await response.text();
+        perfInfo.bytes = bodyText.length;
 
         if (!response.ok) {
-            const errBody = await response.json().catch(() => ({}));
+            let errBody = {};
+            try { errBody = JSON.parse(bodyText); } catch (_) {}
             console.error(`GraphQL HTTP Error ${response.status}:`, JSON.stringify(errBody));
             throw new Error(`HTTP ${response.status}: ${JSON.stringify(errBody)}`);
         }
 
-        const result = await response.json();
+        const result = JSON.parse(bodyText);
+        perfInfo.ok = !result.errors;
         if (result.errors) {
-            console.error(`GraphQL Errors:`, JSON.stringify(result.errors));
+            console.error(`GraphQL Errors (${_gqlOpName(query)}):`, JSON.stringify(result.errors), 'Variables:', JSON.stringify(variables));
         }
-        console.log(`GraphQL Response - Region: ${region}:`, result);
+        // One line per call — full response bodies are available in DevTools → Network.
+        console.log(`GraphQL ${_gqlOpName(query)} [${region}] ${response.status} · ${Math.round(performance.now() - started)} ms · ${(bodyText.length / 1024).toFixed(1)} KB`);
         return result;
     } catch (err) {
         clearTimeout(timeoutId);
@@ -40,17 +93,20 @@ async function graphqlRequest(query, variables = {}, region = null) {
             throw new Error('HTTP 504: Request timed out after 60 seconds');
         }
         throw err;
+    } finally {
+        _gqlReleaseSlot();
+        if (perfHandle) window.Perf.callEnd(perfHandle, perfInfo);
     }
 }
 
-// Unified GraphQL query execution with automatic retry on 504/502/503 and token-refresh on 401
-async function executeGraphQLQuery(query, variables = {}, region = null, retries = 3) {
+// Unified GraphQL query execution with automatic retry on 429/502/503/504 and token-refresh on 401
+async function executeGraphQLQuery(query, variables = {}, region = null, retries = 3, opts = {}) {
     let _tokenRefreshed = false;
     for (let attempt = 1; attempt <= retries; attempt++) {
         try {
-            return await graphqlRequest(query, variables, region);
+            return await graphqlRequest(query, variables, region, opts);
         } catch (error) {
-            const isTransient = /50[234]/.test(error.message) || error.message.includes('504');
+            const isTransient = /HTTP (429|50[234])/.test(error.message) || error.message.includes('504');
             const is401 = error.message.includes('401');
             if (is401 && !_tokenRefreshed && sessionId) {
                 // Token expired — trigger server-side OAuth refresh, then retry once

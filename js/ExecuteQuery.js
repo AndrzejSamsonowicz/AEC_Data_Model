@@ -267,7 +267,19 @@ const _elemSampleQueryV1 = `
         }
     }`;
 
-function _prefetchParamNames(egId, region) {
+// Page size for propertyDefinitionsByElementGroup. Files commonly have 1,800+ definitions, so
+// bigger pages mean far fewer sequential round trips. Drops to 200 (the previous value) for the
+// rest of the session if the API rejects 500 (e.g. per-query point limit).
+let _propDefPageLimit = 500;
+
+// opts.background: fetch at low priority in the request pool (graphql.js). A later call for the
+// same file without it (i.e. the user is now waiting) promotes the remaining pages to normal.
+function _prefetchParamNames(egId, region, opts = {}) {
+    window._paramNamesPriority = window._paramNamesPriority || {};
+    const priority = window._paramNamesPriority[egId] || (window._paramNamesPriority[egId] = { background: !!opts.background });
+    if (!opts.background) priority.background = false;
+    const gqlOpts = { background: () => priority.background };
+
     // Return existing promise (in-progress or resolved) — never double-fetch
     if (window._paramNamesPromises[egId]) return window._paramNamesPromises[egId];
 
@@ -279,12 +291,24 @@ function _prefetchParamNames(egId, region) {
 
         // ── Part 1: property definitions (fast, paginated) ────────────────────
         let cursor = null;
+        let retryPage = false;
         do {
+            retryPage = false;
+            const limit = _propDefPageLimit;
+            // The API rejects an oversized page either as GraphQL errors or as an HTTP 400.
+            const rejectLimit = (detail) => {
+                if (limit <= 200) return false;
+                console.warn(`GetPropDefs rejected limit ${limit} — falling back to 200:`, String(detail).slice(0, 300));
+                _propDefPageLimit = 200;
+                retryPage = true; // retry this page with the smaller limit
+                return true;
+            };
             try {
                 const r = await executeGraphQLQuery(_propDefQuery, {
                     elementGroupId: egId,
-                    pagination: cursor ? { cursor, limit: 200 } : { limit: 200 }
-                }, region);
+                    pagination: cursor ? { cursor, limit } : { limit }
+                }, region, 3, gqlOpts);
+                if (r.errors && !r.data?.propertyDefinitionsByElementGroup && rejectLimit(JSON.stringify(r.errors))) continue;
                 const data = r.data?.propertyDefinitionsByElementGroup;
                 for (const def of (data?.results || [])) {
                     if (!def.name) continue;
@@ -296,8 +320,11 @@ function _prefetchParamNames(egId, region) {
                     }
                 }
                 cursor = data?.pagination?.cursor || null;
-            } catch (_) { cursor = null; }
-        } while (cursor);
+            } catch (err) {
+                if (/HTTP 400/.test(err.message) && rejectLimit(err.message)) continue;
+                cursor = null;
+            }
+        } while (cursor || retryPage);
 
         // ── Part 2: sample elements to catch informal properties ──────────────
         // Some Revit parameters (e.g. Fire_Resistance_Rating) only appear on
@@ -317,7 +344,7 @@ function _prefetchParamNames(egId, region) {
                 const r = await executeGraphQLQuery(sampleQuery, {
                     elementGroupId: egId,
                     pagination: sampleCursor ? { cursor: sampleCursor, limit: 100 } : { limit: 100 }
-                }, region);
+                }, region, 3, gqlOpts);
                 const pageData = r.data?.[dataKey];
                 const results  = pageData?.results || [];
                 let newNamesFound = 0;
@@ -438,7 +465,6 @@ async function executeLatestQuery(hubId, category, region) {
                 for (const eg of egs) {
                     console.log(`[EQ-FINAL] ${eg.name}: egId=…${eg.id.slice(-15)} fileVersionUrn=${eg.fileVersionUrn || 'null'}`);
                     fileSummary.push({ egId: eg.id, egName: eg.name, projectName: project.name, projectId: project.id, count: 1, hasMore: false, fileUrn: eg.fileUrn, fileVersionUrn: eg.fileVersionUrn });
-                    _prefetchParamNames(eg.id, region);  // fire-and-forget
                 }
                 scanned += egs.length;
                 createTreemapVisualization([...fileSummary], 'All Files');
@@ -454,7 +480,6 @@ async function executeLatestQuery(hubId, category, region) {
                         const hasMore = !!(data?.pagination?.cursor);
                         if (count > 0) {
                             fileSummary.push({ egId: eg.id, egName: eg.name, projectName: project.name, projectId: project.id, count, hasMore, fileUrn: eg.fileUrn, fileVersionUrn: eg.fileVersionUrn });
-                            _prefetchParamNames(eg.id, region);  // fire-and-forget
                             createTreemapVisualization([...fileSummary], category);
                             await new Promise(r => setTimeout(r, 0));
                         }
@@ -566,7 +591,6 @@ async function executeV1Query(hubId, category, region) {
             for (const eg of egs) {
                 console.log(`[EQ-FINAL] ${eg.name}: egId=…${eg.id.slice(-15)} fileVersionUrn=${eg.fileVersionUrn || 'null'}`);
                 fileSummary.push({ egId: eg.id, egName: eg.name, projectName: project.name, projectId: project.id, count: 1, hasMore: false, fileUrn: eg.fileUrn, fileVersionUrn: eg.fileVersionUrn });
-                _prefetchParamNames(eg.id, region);  // fire-and-forget
             }
             scanned += egs.length;
             createTreemapVisualization([...fileSummary], 'All Files');
@@ -583,7 +607,6 @@ async function executeV1Query(hubId, category, region) {
                 const hasMore = !!(data?.pagination?.cursor);
                 if (count > 0) {
                     fileSummary.push({ egId: eg.id, egName: eg.name, projectName: project.name, projectId: project.id, count, hasMore, fileUrn: eg.fileUrn, fileVersionUrn: eg.fileVersionUrn });
-                    _prefetchParamNames(eg.id, region);  // fire-and-forget
                     createTreemapVisualization([...fileSummary], category);
                     await new Promise(r => setTimeout(r, 0)); // yield for repaint
                 }
@@ -1171,6 +1194,12 @@ function updateViewerButton() {
     if (!countEl) return;
     const n = selectedEgIds.size;
     countEl.textContent = `${n} file${n !== 1 ? 's' : ''} selected`;
+
+    // Start loading parameter names for newly selected files in the background, so Explore
+    // Parameters is ready sooner. Low priority: never delays calls the user is waiting on.
+    if (example1State.region) {
+        selectedEgIds.forEach(egId => _prefetchParamNames(egId, example1State.region, { background: true }));
+    }
 }
 
 function clearTreemapSelection() {

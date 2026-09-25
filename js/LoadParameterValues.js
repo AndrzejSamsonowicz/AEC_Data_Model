@@ -1,5 +1,9 @@
 ﻿// LoadParameterValues.js – Phase 2: load parameter values and render treemaps
 
+// Elements per page for the Load Values scan when only the needed properties are requested.
+// Drops to 200 (the full-property page size) for the session if the API rejects 500.
+let _peScanPageLimit = 500;
+
 function _peGetSelectedFilesSnapshot() {
     const liveSelected = (typeof selectedEgIds !== 'undefined')
         ? (example1State.fileSummary || []).filter(f => selectedEgIds.has(f.egId))
@@ -167,30 +171,48 @@ async function _peLoadCheckedValues(forceElementScan = true) {
 
         const isV1batch = example1State.version === 'v1';
         const batchScanKey = isV1batch ? 'elementsByElementGroupAtVersion' : 'elementsByElementGroup';
-        const batchScanQ = isV1batch
-            ? `query ScanBatch($elementGroupId: ID!, $filter: ElementFilterInput, $pagination: PaginationInput) {
+        // Filtered variant asks only for the properties the scan reads (selected parameters plus
+        // the Revit ID / Element Context / Category helpers) instead of every property on every
+        // element. The unfiltered variant is the fallback for files where that finds no Revit IDs.
+        const makeScanQuery = (filtered) => {
+            const propArgs = filtered ? 'filter: $propFilter, pagination: { limit: 500 }' : 'pagination: { limit: 500 }';
+            const propVar = filtered ? ', $propFilter: PropertyFilterInput' : '';
+            return isV1batch
+                ? `query ScanBatch($elementGroupId: ID!, $filter: ElementFilterInput, $pagination: PaginationInput${propVar}) {
                    elementsByElementGroupAtVersion(elementGroupId: $elementGroupId, versionNumber: 1, filter: $filter, pagination: $pagination) {
                        pagination { cursor }
-                       results { name properties(pagination: { limit: 500 }) { results { name value } } }
+                       results { name properties(${propArgs}) { results { name value } } }
                    } }`
-            : `query ScanBatch($elementGroupId: ID!, $filter: ElementFilterInput, $pagination: PaginationInput) {
+                : `query ScanBatch($elementGroupId: ID!, $filter: ElementFilterInput, $pagination: PaginationInput${propVar}) {
                    elementsByElementGroup(elementGroupId: $elementGroupId, filter: $filter, pagination: $pagination) {
                        pagination { cursor }
-                       results { name properties(pagination: { limit: 500 }) { results { name value } } }
+                       results { name properties(${propArgs}) { results { name value } } }
                    } }`;
+        };
+        const scanQFiltered = makeScanQuery(true);
+        const scanQFull = makeScanQuery(false);
+        const FULL_PAGE_LIMIT = 200;
         // Group workItems by file so each file's elements are scanned exactly once
         const byFile = new Map(); // egId → { f, items: [{paramName, apiName, altName}] }
         for (const { f, paramName, apiName } of workItems) {
             if (!byFile.has(f.egId)) byFile.set(f.egId, { f, items: [] });
             byFile.get(f.egId).items.push({ paramName, apiName, altName: apiName.replace(/_/g, ' ') });
         }
-        const scanCache = {};  // egId → paramName → value → [revitId, \u2026]
+        const scanCache = {};  // egId → paramName → value → [revitId, …]
         window._peElementScanCache = scanCache;
         window._peScanCompleted = new Set(); // egIds that have finished their scan
         let filesDone = 0;
-        for (const [egId, { f, items }] of byFile) {
-            if (modal.style.display === 'none') return;
-            if (window._paramExplorerAgg !== agg) return;
+        let elementsScanned = 0;
+        const updateScanProgress = () => {
+            subtitle.textContent = `Scanning ${byFile.size} file(s) — ${filesDone} done, ~${elementsScanned.toLocaleString()} elements…`;
+            const _pbTxt = document.getElementById('peScanProgressText');
+            if (_pbTxt) _pbTxt.textContent = `${filesDone} / ${byFile.size} file(s) done  —  ~${elementsScanned.toLocaleString()} elements scanned…`;
+        };
+        const scanAborted = () => modal.style.display === 'none' || window._paramExplorerAgg !== agg;
+
+        // Files are scanned in parallel; the request pool in graphql.js caps concurrency.
+        // Pages within a file stay sequential (each needs the previous page's cursor).
+        const scanFile = async (egId, f, items) => {
             scanCache[egId] = {};
             scanCache[egId]._names      = {}; // revitId → element name
             scanCache[egId]._categories = {}; // revitId → Revit category name
@@ -199,37 +221,72 @@ async function _peLoadCheckedValues(forceElementScan = true) {
                 valueCounts[paramName] = new Map();
                 scanCache[egId][paramName] = {};
             }
-            const PAGE_LIMIT = 200;
-            let batchCursor = null, batchPage = 0;
+            const propNames = [...new Set([
+                'Revit Element ID', 'Element ID', 'Element Context', 'Revit Category Type Id',
+                ...items.flatMap(({ paramName, apiName, altName }) => [paramName, apiName, altName, apiName.replace(/ /g, '_')])
+            ])];
+            let filtered = true;
             let _typeSkipped = 0, _noIdSkipped = 0, _instanceKept = 0;
-            // Pipeline: kick off the first fetch immediately so processing
-            // of page N overlaps with the network wait for page N+1.
-            let nextPagePromise = executeGraphQLQuery(batchScanQ, {
-                elementGroupId: egId,
-                pagination: { limit: PAGE_LIMIT }
-            }, region);
-            while (true) {
-                if (modal.style.display === 'none') return;
-                batchPage++;
-                const scannedSoFar = (batchPage - 1) * PAGE_LIMIT;
-                subtitle.textContent = `Scanning ${f.egName} \u2014 ~${scannedSoFar.toLocaleString()} elements\u2026`;
-                // Update inline scan progress text
-                const _pbTxt = document.getElementById('peScanProgressText');
-                if (_pbTxt && batchPage > 1) {
-                    const _doneF = window._peScanCompleted?.size ?? 0;
-                    _pbTxt.textContent = `File ${_doneF + 1} / ${byFile.size}  \u2014  ~${scannedSoFar.toLocaleString()} elements scanned\u2026`;
-                }
-                const rs = await nextPagePromise;
-                const pageData = rs.data?.[batchScanKey];
-                batchCursor = pageData?.pagination?.cursor || null;
-                // Pipeline: start fetching next page before processing current one
-                if (batchCursor) {
-                    nextPagePromise = executeGraphQLQuery(batchScanQ, {
+
+            // Fetch one page. Returns { fallback: true } when the filtered query is rejected
+            // outright, so the caller can switch this file to the unfiltered query.
+            const fetchPage = async (cursor) => {
+                for (;;) {
+                    const limit = filtered ? _peScanPageLimit : FULL_PAGE_LIMIT;
+                    const vars = {
                         elementGroupId: egId,
-                        pagination: { cursor: batchCursor, limit: PAGE_LIMIT }
-                    }, region);
+                        pagination: cursor ? { cursor, limit } : { limit },
+                        ...(filtered ? { propFilter: { names: propNames } } : {})
+                    };
+                    let rejected = null;
+                    try {
+                        const r = await executeGraphQLQuery(filtered ? scanQFiltered : scanQFull, vars, region);
+                        if (!(r.errors && !r.data?.[batchScanKey])) return r;
+                        rejected = JSON.stringify(r.errors);
+                    } catch (err) {
+                        if (!/HTTP 400/.test(err.message)) throw err;
+                        rejected = err.message;
+                    }
+                    if (!filtered) return { data: null, errors: rejected };
+                    if (limit > FULL_PAGE_LIMIT) {
+                        // Too many points for one query — retry this page at the old page size.
+                        console.warn(`[PA-SCAN] ScanBatch rejected limit ${limit} — falling back to ${FULL_PAGE_LIMIT}:`, String(rejected).slice(0, 300));
+                        _peScanPageLimit = FULL_PAGE_LIMIT;
+                        continue;
+                    }
+                    console.warn(`[PA-SCAN] ${f.egName}: filtered scan rejected — using full-property scan:`, String(rejected).slice(0, 300));
+                    return { fallback: true };
                 }
-                for (const el of (pageData?.results || [])) {
+            };
+
+            let firstPage = true;
+            let nextPagePromise = fetchPage(null);
+            while (true) {
+                if (scanAborted()) return;
+                const rs = await nextPagePromise;
+                if (rs.fallback) {
+                    if (!firstPage) { console.error(`[PA-SCAN] ${f.egName}: filtered scan failed mid-file — results for this file are partial.`); break; }
+                    filtered = false;
+                    nextPagePromise = fetchPage(null);
+                    continue;
+                }
+                const pageData = rs.data?.[batchScanKey];
+                const results = pageData?.results || [];
+                // Safety net: the name filter can't see a Revit ID stored under an unexpected name
+                // (the finder's fuzzy "element…id" fallback). If page 1 has elements but no IDs,
+                // rescan this file with every property.
+                if (firstPage && filtered && results.length &&
+                    !results.some(el => _peFindRevitIdValue(el.properties?.results || []))) {
+                    console.warn(`[PA-SCAN] ${f.egName}: no Revit IDs with filtered properties — using full-property scan.`);
+                    filtered = false;
+                    nextPagePromise = fetchPage(null);
+                    continue;
+                }
+                firstPage = false;
+                const batchCursor = pageData?.pagination?.cursor || null;
+                // Pipeline: start fetching next page before processing current one
+                if (batchCursor) nextPagePromise = fetchPage(batchCursor);
+                for (const el of results) {
                     const props = el.properties?.results || [];
                     const revitId = _peFindRevitIdValue(props);
                     // Skip non-Revit elements (lines, annotations, groups, etc.) — only
@@ -263,15 +320,18 @@ async function _peLoadCheckedValues(forceElementScan = true) {
                             scanCache[egId][paramName]['(empty)'].push(revitId);
                             continue;
                         }
-                        const v = String(prop.value).length > 120 ? String(prop.value).slice(0, 120) + '\u2026' : String(prop.value);
+                        const v = String(prop.value).length > 120 ? String(prop.value).slice(0, 120) + '…' : String(prop.value);
                         valueCounts[paramName].set(v, (valueCounts[paramName].get(v) || 0) + 1);
                         if (!scanCache[egId][paramName][v]) scanCache[egId][paramName][v] = [];
                         scanCache[egId][paramName][v].push(revitId);
                     }
                 }
+                elementsScanned += results.length;
+                updateScanProgress();
                 if (!batchCursor) break;
             }
-            console.log(`[PA-FILTER] ${f.egName}: kept=${_instanceKept} nonViewerSkipped=${_typeSkipped} noIdSkipped=${_noIdSkipped} viewerIndexUsed=${!!viewerRevitIds}`);
+            if (scanAborted()) return;
+            console.log(`[PA-FILTER] ${f.egName}: kept=${_instanceKept} nonViewerSkipped=${_typeSkipped} noIdSkipped=${_noIdSkipped} viewerIndexUsed=${!!viewerRevitIds} filteredProps=${filtered}`);
             // Populate agg from scan results (per-file)
             for (const { paramName } of items) {
                 if (!agg.has(paramName)) agg.set(paramName, new Map());
@@ -286,9 +346,15 @@ async function _peLoadCheckedValues(forceElementScan = true) {
             }
             filesDone++;
             window._peScanCompleted.add(egId);
-            subtitle.textContent = `Full scan: ${filesDone} / ${byFile.size} file(s) done\u2026`;
+            updateScanProgress();
             _peScheduleRender();
-        }
+        };
+
+        if (scanAborted()) return;
+        updateScanProgress();
+        await Promise.all([...byFile].map(([egId, { f, items }]) => scanFile(egId, f, items)));
+        if (scanAborted()) return;
+        subtitle.textContent = `Full scan: ${filesDone} / ${byFile.size} file(s) done…`;
     } // end forceElementScan batched scan
     if (!forceElementScan) {
     let done = 0;

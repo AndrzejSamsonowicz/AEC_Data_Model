@@ -22,33 +22,65 @@
         return SUPPRESS_PATTERNS.some(p => p.test(str));
     }
 
+    // Log entries are batched: one POST per second (or per 200 entries / ~500 KB) instead of
+    // one POST per console call, so logging doesn't compete with GraphQL calls for the
+    // browser's few connections to localhost:3000. Long messages are truncated in debug.log
+    // only — the DevTools console still receives the full arguments.
+    const MAX_MESSAGE_CHARS = 20000;
+    const FLUSH_INTERVAL_MS = 1000;
+    const MAX_BATCH_ENTRIES = 200;
+    const MAX_BATCH_CHARS = 500000;
+    let pendingEntries = [];
+    let pendingChars = 0;
+    let flushTimer = null;
+
+    function flushLogs(onPageExit) {
+        if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+        if (!pendingEntries.length) return;
+        const body = JSON.stringify({ entries: pendingEntries });
+        pendingEntries = [];
+        pendingChars = 0;
+        if (window.Perf) window.Perf.recordLog(body.length);
+
+        if (onPageExit && navigator.sendBeacon) {
+            navigator.sendBeacon(`${API_BASE}/api/log`, new Blob([body], { type: 'application/json' }));
+            return;
+        }
+        fetch(`${API_BASE}/api/log`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body
+        }).catch(() => {}); // Silently fail if logging fails
+    }
+
+    window.addEventListener('pagehide', () => flushLogs(true));
+
     function sendLogToServer(level, args, context = null) {
         if (shouldSuppress(args)) return;
-        const message = args.map(arg => {
+        let message = args.map(arg => {
             if (arg instanceof Error) {
                 return `${arg.name}: ${arg.message}${arg.stack ? '\n' + arg.stack : ''}`;
             }
             if (typeof arg === 'object' && arg !== null) {
                 try {
-                    return JSON.stringify(arg, null, 2);
+                    return JSON.stringify(arg);
                 } catch (e) {
                     return String(arg);
                 }
             }
             return String(arg);
         }).join(' ');
+        if (message.length > MAX_MESSAGE_CHARS) {
+            message = message.slice(0, MAX_MESSAGE_CHARS) + ` …[truncated ${message.length - MAX_MESSAGE_CHARS} chars]`;
+        }
 
-        // Send to server asynchronously (don't wait for response)
-        fetch(`${API_BASE}/api/log`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                level,
-                message,
-                context,
-                timestamp: new Date().toISOString()
-            })
-        }).catch(() => {}); // Silently fail if logging fails
+        pendingEntries.push({ level, message, context, timestamp: new Date().toISOString() });
+        pendingChars += message.length;
+        if (pendingEntries.length >= MAX_BATCH_ENTRIES || pendingChars >= MAX_BATCH_CHARS) {
+            flushLogs(false);
+        } else if (!flushTimer) {
+            flushTimer = setTimeout(() => flushLogs(false), FLUSH_INTERVAL_MS);
+        }
     }
 
     // Override console methods using one shared wrapper pattern

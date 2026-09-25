@@ -1370,8 +1370,9 @@ async function _peBuildViewerRevitIds() {
 // pending rows for each egId — the egId with the most matches wins.
 // This avoids relying on JavaScript object identity or model load order.
 async function _peIsolateWithFocus(allPairs, focusPairs, focusColor, options) {
-    // Clear debug log so this run is the only thing visible
-    fetch(window.API_BASE + '/api/log/clear', { method: 'POST', headers: { 'Content-Type': 'application/json' } }).catch(() => {});
+    // Mark the start of this run in debug.log (rather than clearing it, which would also
+    // erase earlier [PERF] summaries).
+    console.log('──────── PE focus run ────────');
 
     const allModels = (viewer.getVisibleModels ? viewer.getVisibleModels() : null)
                    || (viewer.impl && viewer.impl.modelQueue ? viewer.impl.modelQueue().getModels() : null)

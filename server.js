@@ -302,17 +302,19 @@ app.post('/api/token', async (req, res) => {
     });
 });
 
-// Debug logging endpoint
+// Debug logging endpoint — accepts a batch { entries: [...] } (js/logging.js) or a single entry
 app.post('/api/log', (req, res) => {
-    const { level, message, timestamp, context } = req.body;
-    
-    // Use provided timestamp or current time if not provided
-    const logTime = timestamp ? new Date(timestamp).toISOString() : new Date().toISOString();
-    const contextText = context ? ` ${JSON.stringify(context)}` : '';
-    const logEntry = `[${logTime}] [${level.toUpperCase()}] ${message}${contextText}\n`;
-    
+    const entries = Array.isArray(req.body?.entries) ? req.body.entries : [req.body];
+
+    const text = entries.map(({ level, message, timestamp, context }) => {
+        // Use provided timestamp or current time if not provided
+        const logTime = timestamp ? new Date(timestamp).toISOString() : new Date().toISOString();
+        const contextText = context ? ` ${JSON.stringify(context)}` : '';
+        return `[${logTime}] [${String(level || 'log').toUpperCase()}] ${message}${contextText}\n`;
+    }).join('');
+
     // Append to debug.log file
-    fs.appendFile(path.join(__dirname, 'debug.log'), logEntry, (err) => {
+    fs.appendFile(path.join(__dirname, 'debug.log'), text, (err) => {
         if (err) {
             console.error('Error writing to debug.log:', err);
             return res.status(500).json({ error: 'Failed to write log' });
@@ -335,6 +337,7 @@ app.post('/api/log/clear', (req, res) => {
 
 // Proxy endpoint for GraphQL requests (to avoid CORS issues)
 app.post('/api/graphql', async (req, res) => {
+    const proxyStart = Date.now();
     const { query, variables, sessionId, region } = req.body;
 
     if (!sessionId) {
@@ -356,17 +359,30 @@ app.post('/api/graphql', async (req, res) => {
             variables
         });
 
-        const response = await axios.post(
-            'https://developer.api.autodesk.com/aec/graphql',
-            { query, variables },
-            {
-                headers: {
-                    'Authorization': `Bearer ${tokenData.accessToken}`,
-                    'Content-Type': 'application/json',
-                    'Region': requestRegion
+        // Timing headers read by js/perf.js: time spent waiting on Autodesk vs. in this proxy.
+        const setTimingHeaders = (apsMs) => {
+            const proxyMs = Date.now() - proxyStart;
+            res.set('X-APS-Ms', String(apsMs));
+            res.set('X-Proxy-Ms', String(proxyMs));
+            res.set('Server-Timing', `aps;dur=${apsMs}, proxy;dur=${proxyMs}`);
+        };
+        const apsStart = Date.now();
+        let response;
+        try {
+            response = await axios.post(
+                'https://developer.api.autodesk.com/aec/graphql',
+                { query, variables },
+                {
+                    headers: {
+                        'Authorization': `Bearer ${tokenData.accessToken}`,
+                        'Content-Type': 'application/json',
+                        'Region': requestRegion
+                    }
                 }
-            }
-        );
+            );
+        } finally {
+            setTimingHeaders(Date.now() - apsStart);
+        }
 
         console.log('GraphQL Response:', response.status, response.data.errors ? 'HAS ERRORS' : 'SUCCESS');
         
