@@ -657,6 +657,10 @@ function handleViewerSelection(event) {
         window.ReorderController.onViewerSelection(event, false);
         return;
     }
+    if (window.BulkAssignController && window.BulkAssignController.isEnabled && window.BulkAssignController.isEnabled()) {
+        window.BulkAssignController.onViewerSelection(event, false);
+        return;
+    }
 
     const dbIds = event.dbIdArray;
     
@@ -700,6 +704,10 @@ function handleViewerSelection(event) {
 function handleAggregateViewerSelection(event) {
     if (window.ReorderController && window.ReorderController.isEnabled && window.ReorderController.isEnabled()) {
         window.ReorderController.onViewerSelection(event, true);
+        return;
+    }
+    if (window.BulkAssignController && window.BulkAssignController.isEnabled && window.BulkAssignController.isEnabled()) {
+        window.BulkAssignController.onViewerSelection(event, true);
         return;
     }
 
@@ -756,6 +764,24 @@ function _peRenderParamTable(panel, rows) {
     const fileNames = [...new Set(rows.map(r => r.fileContext?.fileName).filter(Boolean))];
     const isMultiFile = fileNames.length > 1;
 
+    // Rows for the same file can end up non-contiguous in the underlying array (e.g. the same
+    // file scanned more than once). Compute a display order that groups each file's rows
+    // together — WITHOUT reordering the real `rows` array, since Reorder mode's click-sequence
+    // "Reorder in List" feature and data-idx lookups depend on the underlying array order.
+    let displayOrder = rows.map((_, i) => i);
+    if (isMultiFile) {
+        const firstSeenRank = new Map();
+        rows.forEach(r => {
+            const f = r.fileContext?.fileName || '';
+            if (!firstSeenRank.has(f)) firstSeenRank.set(f, firstSeenRank.size);
+        });
+        displayOrder = displayOrder.slice().sort((a, b) => {
+            const fa = firstSeenRank.get(rows[a].fileContext?.fileName || '') || 0;
+            const fb = firstSeenRank.get(rows[b].fileContext?.fileName || '') || 0;
+            return fa !== fb ? fa - fb : a - b; // stable within each file group
+        });
+    }
+
     let html = '<div style="overflow-x:hidden;margin-bottom:2px;">';
     html += '<table id="peParamTable" style="width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed;font-family:\'ArtifaktElement\',\'Helvetica Neue\',Arial,sans-serif;">';
     html += '<colgroup><col id="peParamCol0" style="width:20px"><col id="peParamCol1" style="width:35%"><col id="peParamCol2" style="width:25%"><col id="peParamCol3"></colgroup>';
@@ -767,7 +793,8 @@ function _peRenderParamTable(panel, rows) {
     html += '</tr></thead>';
     html += '<tbody id="peParamTbody">';
     var lastFileName = null;
-    rows.forEach(function(row, i) {
+    displayOrder.forEach(function(i) {
+        var row = rows[i];
         // Insert a file separator row when the file changes (multi-file mode)
         if (isMultiFile) {
             var rowFile = row.fileContext?.fileName || '';

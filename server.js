@@ -738,11 +738,42 @@ async function ensureDASetup(appToken, nickname, revitEngine, _retryDepth = 0) {
             console.log(`DA [Bundle:1] ✓ AppBundle '${bundleName}' prod alias exists at v${r.data.version} (engine=${existingBundleEngine}).`);
         } else {
             console.log(`DA [Bundle:1] Engine mismatch — existing=${existingBundleEngine} wanted=${revitEngine} — creating new bundle version.`);
-            const newBundleVerResp = await axios.post(`${DA_BASE}/appbundles/${bundleName}/versions`, {
-                engine: revitEngine,
-                description: 'Update Revit element parameters — AEC Data Model Viewer'
-            }, { headers });
-            console.log(`DA [Bundle:1] ✓ New bundle version v${newBundleVerResp.data?.version} created.`);
+            let newBundleVerResp;
+            try {
+                newBundleVerResp = await axios.post(`${DA_BASE}/appbundles/${bundleName}/versions`, {
+                    engine: revitEngine,
+                    description: 'Update Revit element parameters — AEC Data Model Viewer'
+                }, { headers });
+                console.log(`DA [Bundle:1] ✓ New bundle version v${newBundleVerResp.data?.version} created.`);
+            } catch (ve) {
+                const veStatus = ve.response?.status;
+                const veBody   = JSON.stringify(ve.response?.data);
+                console.error(`DA [Bundle:1!] POST /versions failed — HTTP ${veStatus}: ${veBody}`);
+                if (veStatus !== 403) throw ve;
+                // Version limit (max 100) hit — delete the bundle entirely and recreate fresh with the new engine
+                console.log(`DA [Bundle:1D] Version limit — deleting AppBundle '${bundleName}' (all versions + aliases) and recreating.`);
+                try {
+                    await axios.delete(`${DA_BASE}/appbundles/${bundleName}`, { headers });
+                    console.log(`DA [Bundle:1D] ✓ Delete succeeded.`);
+                } catch (de) {
+                    console.error(`DA [Bundle:1D!] Delete failed — HTTP ${de.response?.status}: ${JSON.stringify(de.response?.data)}`);
+                    if (de.response?.status !== 404) throw de;
+                }
+                console.log(`DA [Bundle:1R] POST /appbundles (fresh recreate, engine=${revitEngine}).`);
+                try {
+                    newBundleVerResp = await axios.post(`${DA_BASE}/appbundles`, {
+                        id: bundleName, engine: revitEngine,
+                        description: 'Update Revit element parameters — AEC Data Model Viewer'
+                    }, { headers });
+                    console.log(`DA [Bundle:1R] ✓ Recreated at v${newBundleVerResp.data?.version}`);
+                } catch (re) {
+                    if (re.response?.status === 403) {
+                        console.error(`DA [Bundle:1R!] Still 403 — name permanently exhausted. Scanning forward.`);
+                        return exhaustCurrentAndFindClean();
+                    }
+                    throw re;
+                }
+            }
             await uploadAndAlias(newBundleVerResp.data);
         }
     } catch (e) {

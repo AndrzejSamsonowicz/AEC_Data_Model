@@ -51,31 +51,13 @@
         }).catch(() => {}); // Silently fail if logging fails
     }
 
-    // Override console methods
-    console.log = function(...args) {
-        originalConsole.log.apply(console, args);
-        sendLogToServer('log', args);
-    };
-
-    console.error = function(...args) {
-        originalConsole.error.apply(console, args);
-        sendLogToServer('error', args);
-    };
-
-    console.warn = function(...args) {
-        originalConsole.warn.apply(console, args);
-        sendLogToServer('warn', args);
-    };
-
-    console.info = function(...args) {
-        originalConsole.info.apply(console, args);
-        sendLogToServer('info', args);
-    };
-
-    console.debug = function(...args) {
-        originalConsole.debug.apply(console, args);
-        sendLogToServer('debug', args);
-    };
+    // Override console methods using one shared wrapper pattern
+    ['log', 'error', 'warn', 'info', 'debug'].forEach((level) => {
+        console[level] = function(...args) {
+            originalConsole[level].apply(console, args);
+            sendLogToServer(level, args);
+        };
+    });
 
     // Capture uncaught errors
     window.addEventListener('error', (event) => {
@@ -102,7 +84,7 @@
             headers: { 'Content-Type': 'application/json' }
         });
         console.log('Debug log cleared on page load');
-    } catch (error) {
+    } catch (_error) {
         // Silently fail if clear fails
     }
 })();

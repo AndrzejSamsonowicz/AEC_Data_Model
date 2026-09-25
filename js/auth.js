@@ -1,5 +1,32 @@
 // Authentication and Settings Management
 
+function updateAuthUi(isAuthenticated) {
+    const loginBtn = document.getElementById('loginBtn');
+    const logoutBtn = document.getElementById('logoutBtn');
+    if (!loginBtn || !logoutBtn) return;
+
+    if (isAuthenticated) {
+        loginBtn.textContent = 'Logged In ✓';
+        loginBtn.classList.remove('btn-secondary');
+        loginBtn.classList.add('btn-primary');
+        loginBtn.onclick = logout;
+        logoutBtn.style.display = '';
+        return;
+    }
+
+    loginBtn.textContent = 'Login With Autodesk';
+    loginBtn.classList.remove('btn-secondary');
+    loginBtn.classList.add('btn-primary');
+    loginBtn.onclick = loginWithAutodesk;
+    logoutBtn.style.display = 'none';
+}
+
+function scheduleHubLoad() {
+    if (typeof loadHubs === 'function') {
+        setTimeout(loadHubs, 100);
+    }
+}
+
 async function loadSettings() {
     try {
         const response = await fetch(`${API_BASE}/api/settings`);
@@ -25,15 +52,9 @@ async function loadSettings() {
         } else if (session) {
             sessionId = session;
             localStorage.setItem('apsSessionId', sessionId);
-            document.getElementById('loginBtn').textContent = 'Logged In ✓';
-            document.getElementById('loginBtn').classList.replace('btn-secondary', 'btn-primary');
-            document.getElementById('loginBtn').onclick = logout;
-            document.getElementById('logoutBtn').style.display = '';
+            updateAuthUi(true);
             window.history.replaceState({}, document.title, window.location.pathname);
-            // Load hubs if function is available
-            if (typeof loadHubs === 'function') {
-                setTimeout(() => loadHubs(), 100);
-            }
+            scheduleHubLoad();
         } else {
             const savedSession = localStorage.getItem('apsSessionId');
             if (savedSession) {
@@ -41,20 +62,18 @@ async function loadSettings() {
                     const tokenResponse = await fetch(`${API_BASE}/api/token/${savedSession}`);
                     if (tokenResponse.ok) {
                         sessionId = savedSession;
-                        document.getElementById('loginBtn').textContent = 'Logged In ✓';
-                        document.getElementById('loginBtn').classList.replace('btn-secondary', 'btn-primary');
-                        document.getElementById('loginBtn').onclick = logout;
-                        document.getElementById('logoutBtn').style.display = '';
-                        // Load hubs if function is available
-                        if (typeof loadHubs === 'function') {
-                            setTimeout(() => loadHubs(), 100);
-                        }
+                        updateAuthUi(true);
+                        scheduleHubLoad();
                     } else {
                         localStorage.removeItem('apsSessionId');
+                        updateAuthUi(false);
                     }
                 } catch (error) {
                     localStorage.removeItem('apsSessionId');
+                    updateAuthUi(false);
                 }
+            } else {
+                updateAuthUi(false);
             }
         }
     } catch (error) {
@@ -135,10 +154,7 @@ async function logout() {
     
     sessionId = null;
     localStorage.removeItem('apsSessionId');
-    document.getElementById('loginBtn').textContent = 'Login With Autodesk';
-    document.getElementById('loginBtn').classList.replace('btn-primary', 'btn-primary');
-    document.getElementById('loginBtn').onclick = loginWithAutodesk;
-    document.getElementById('logoutBtn').style.display = 'none';
+    updateAuthUi(false);
     
     document.getElementById('mainContainer').innerHTML = `
         <div class="login-prompt">

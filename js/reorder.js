@@ -23,8 +23,19 @@
         dbIdToRevitId: new Map(),
         lastPickKey: '',
         lastPickAt: 0,
-        colorEpoch: 0
+        colorEpoch: 0,
+        lastAssignment: null,
+        justDeselectedRevitId: null,
+        justDeselectedAt: 0,
+        assignedRevitIds: new Set()
     };
+
+    // `viewer` is declared with `let viewer = null;` at the top level (config.js) — let/const
+    // globals do NOT become window properties (unlike var/top-level function declarations), so
+    // `window.viewer` is ALWAYS undefined. Must check the bare identifier instead.
+    function hasViewer() {
+        return typeof viewer !== 'undefined' && !!viewer;
+    }
 
     function hexToVector4(hex) {
         var h = String(hex || '').trim();
@@ -45,7 +56,7 @@
     }
 
     function applyViewerSelectionColor() {
-        if (!window.viewer || typeof viewer.setSelectionColor !== 'function') return;
+        if (!hasViewer() || typeof viewer.setSelectionColor !== 'function') return;
         try {
             viewer.setSelectionColor(hexToColor(state.selectedColor));
         } catch (e) {
@@ -56,7 +67,7 @@
     }
 
     function colorCurrentSelectionNow() {
-        if (!window.viewer) return;
+        if (!hasViewer()) return;
         var selected = (typeof viewer.getSelection === 'function') ? viewer.getSelection() : [];
         var model = viewer.model || null;
         (selected || []).forEach(function (dbId) {
@@ -73,7 +84,7 @@
     }
 
     function getViewerModels() {
-        if (!window.viewer) return [];
+        if (!hasViewer()) return [];
         return (viewer.getAllModels ? viewer.getAllModels() : (viewer.model ? [viewer.model] : [])) || [];
     }
 
@@ -95,7 +106,7 @@
     }
 
     function colorPickedElement(model, dbId) {
-        if (!window.viewer || dbId === undefined || dbId === null) return;
+        if (!hasViewer() || dbId === undefined || dbId === null) return;
         var epoch = state.colorEpoch;
         var color = hexToVector4(state.selectedColor);
         var targetModels = [];
@@ -113,15 +124,15 @@
         }
 
         targetModels.forEach(function (m) {
+            var modelId = (m && m.id !== undefined) ? String(m.id) : 'default';
+            var key = modelId + '::' + String(dbId);
+            // Track the pick regardless of whether theming succeeds immediately — the
+            // delayed re-apply below is what actually guarantees the visible color.
+            state.pickedEntries.set(key, { model: m, dbId: dbId });
             try {
                 // recursive=true helps when the selected node is a parent/container.
                 viewer.setThemingColor(dbId, color, m, true);
-                var modelId = (m && m.id !== undefined) ? String(m.id) : 'default';
-                var key = modelId + '::' + String(dbId);
-                state.pickedEntries.set(key, { model: m, dbId: dbId });
-            } catch (e) {
-                // Ignore per-model failures and continue.
-            }
+            } catch (e) {}
         });
 
         // Forge selection overlay is applied after selection events; re-apply color
@@ -140,7 +151,7 @@
     }
 
     function refreshPickedColors() {
-        if (!window.viewer) return;
+        if (!hasViewer()) return;
         state.pickedEntries.forEach(function (entry) {
             try {
                 viewer.setThemingColor(entry.dbId, hexToVector4(state.selectedColor), entry.model, true);
@@ -149,6 +160,111 @@
         if (viewer.impl && typeof viewer.impl.invalidate === 'function') {
             viewer.impl.invalidate(true, true, true);
         }
+    }
+
+    // Removes the custom tint from a single element without touching other elements'
+    // theming (w=0 means "no tint" for that dbId, unlike clearThemingColors() which clears everything).
+    function clearThemingForDbId(model, dbId) {
+        if (!hasViewer() || dbId === undefined || dbId === null) return;
+        var targetModels = model ? [model] : getViewerModels();
+        if (!targetModels.length && viewer.model) targetModels = [viewer.model];
+        var noTint = new THREE.Vector4(0, 0, 0, 0);
+        targetModels.forEach(function (m) {
+            try { viewer.setThemingColor(dbId, noTint, m, true); } catch (e) {}
+            var modelId = (m && m.id !== undefined) ? String(m.id) : 'default';
+            state.pickedEntries.delete(modelId + '::' + String(dbId));
+        });
+    }
+
+    // Self-contained recompute (bypasses _peIsolateWithFocus entirely so there's no dependency
+    // on its async cache-rebuild / append-only theming logic): globally clear ALL theming, then
+    // reapply green only for Revit IDs still in state.assignedRevitIds (our own authoritative
+    // tracking — row.__reorderOrdinal on the shared rows array isn't reliable to read back).
+    function recolorAllAssignedRows() {
+        if (!hasViewer()) return;
+        var models = getViewerModels();
+        if (!models.length && viewer.model) models = [viewer.model];
+        // Belt-and-suspenders: explicitly include viewer.model even if getViewerModels()
+        // returned something else, since that's the exact reference the manual repro used.
+        if (viewer.model && models.indexOf(viewer.model) === -1) models.push(viewer.model);
+        models.forEach(function (m) { try { viewer.clearThemingColors(m); } catch (e) {} });
+        try { viewer.clearThemingColors(); } catch (e) {}
+        if (viewer.model) { try { viewer.clearThemingColors(viewer.model); } catch (e) {} }
+        if (viewer.impl && typeof viewer.impl.invalidate === 'function') {
+            viewer.impl.invalidate(true, true, true);
+        }
+
+        // Forge Viewer needs the clear to land on its own render pass before we reapply —
+        // doing clear+reapply in the same synchronous tick can leave the clear "lost" (same
+        // trick colorPickedElement already uses for its post-selection-overlay reapply).
+        var color = hexToVector4(state.selectedColor);
+        var cache = window._peRevitDbIdCache;
+        var idsToReapply = Array.from(state.assignedRevitIds);
+        var epoch = state.colorEpoch;
+        setTimeout(function () {
+            if (epoch !== state.colorEpoch || !hasViewer()) return;
+            idsToReapply.forEach(function (rid) {
+                var entry = cache && cache.get(String(rid));
+                if (!entry) {
+                    return;
+                }
+                var dbId = (typeof entry === 'object' && entry.dbId !== undefined) ? entry.dbId : entry;
+                var model = (typeof entry === 'object' && entry.model) ? entry.model : viewer.model;
+                try { viewer.setThemingColor(dbId, color, model, true); } catch (e) {}
+            });
+            if (viewer.impl && typeof viewer.impl.invalidate === 'function') {
+                viewer.impl.invalidate(true, true, true);
+            }
+        }, 50);
+    }
+
+    // Undoes a re-click on an already-picked element: clear the highlight and the row assignment it made.
+    function handleDeselectPick(pick) {
+        clearThemingForDbId(pick.model, pick.dbId);
+
+        resolveRevitId(pick.model, pick.dbId).then(function (revitId) {
+            var rows = window._pendingParamEditRows || [];
+            var rowIndex = -1;
+            if (revitId) {
+                for (var i = 0; i < rows.length; i++) {
+                    if (rowMatchesRevitId(rows[i], revitId)) {
+                        rowIndex = i;
+                        break;
+                    }
+                }
+            }
+
+            if (viewer.impl && typeof viewer.impl.invalidate === 'function') {
+                viewer.impl.invalidate(true, true, true);
+            }
+            if (rowIndex < 0) {
+                return;
+            }
+
+            var row = rows[rowIndex];
+            row.newValue = '';
+            delete row.__reorderOrdinal;
+            syncInputAt(rowIndex, '');
+
+            (row.revitIds || []).forEach(function (rid) { state.assignedRevitIds.delete(String(rid)); });
+            state.justDeselectedRevitId = revitId;
+            state.justDeselectedAt = Date.now();
+
+            // Recompute theming from scratch now that this row's ordinal is gone.
+            recolorAllAssignedRows();
+
+            // Roll back the counter only if this was the most recent assignment,
+            // so re-picking a different element next continues the sequence cleanly.
+            if (state.lastAssignment && state.lastAssignment.rowIndex === rowIndex) {
+                state.currentNumber = state.lastAssignment.prevNumber;
+                state.alphaCurrent = state.lastAssignment.prevAlphaCurrent;
+                state.lastAssignment = null;
+                updatePreview();
+            }
+
+            state.activeRowIndex = rowIndex;
+            setStatus('Deselected ' + (row.paramName || ('Row ' + (rowIndex + 1))) + '.');
+        });
     }
 
     function resetRevitColorCache() {
@@ -185,12 +301,12 @@
 
                     var dbIds = [];
                     tree.enumNodeChildren(tree.getRootId(), function (dbId) { dbIds.push(dbId); }, true);
-                    model.getBulkProperties(dbIds, { propFilter: ['ElementId', 'Element ID', 'Element_ID', 'Revit Element ID'] }, function (results) {
+                    model.getBulkProperties(dbIds, {}, function (results) {
                         (results || []).forEach(function (item) {
                             var revitId = null;
                             (item.properties || []).forEach(function (p) {
                                 var n = String(p.displayName || '').toLowerCase();
-                                if (!revitId && n.indexOf('element') >= 0 && n.indexOf('id') >= 0) {
+                                if (!revitId && (n.indexOf('elementid') >= 0 || n.indexOf('element id') >= 0 || n.indexOf('element_id') >= 0)) {
                                     revitId = String(p.displayValue || '');
                                 }
                             });
@@ -544,11 +660,13 @@
             input.value = '';
         });
         state.assignmentCounter = 0;
+        state.lastAssignment = null;
+        state.assignedRevitIds.clear();
         clearViewerHighlights();
-        if (window.viewer && typeof viewer.clearSelection === 'function') {
+        if (hasViewer() && typeof viewer.clearSelection === 'function') {
             viewer.clearSelection();
         }
-        if (window.viewer && viewer.impl && typeof viewer.impl.invalidate === 'function') {
+        if (hasViewer() && viewer.impl && typeof viewer.impl.invalidate === 'function') {
             viewer.impl.invalidate(true, true, true);
         }
         resetRevitColorCache();
@@ -590,7 +708,20 @@
 
     function rowMatchesRevitId(row, revitId) {
         if (!row || !row.revitIds || !revitId) return false;
-        return row.revitIds.some(function (rid) { return String(rid) === String(revitId); });
+        // Insulated/lined MEP elements (ducts, pipes) can report a compound "hostId/liningId"
+        // ElementId via getBulkProperties, while rows only store the plain host element ID —
+        // check every segment so those elements still resolve to their row.
+        var candidates = String(revitId).split('/');
+        return row.revitIds.some(function (rid) {
+            var ridStr = String(rid);
+            return candidates.some(function (c) { return c === ridStr; });
+        });
+    }
+
+    // Same compound-ID awareness as rowMatchesRevitId, for checking state.assignedRevitIds directly.
+    function anyRevitIdAssigned(revitId) {
+        if (!revitId) return false;
+        return String(revitId).split('/').some(function (c) { return state.assignedRevitIds.has(c); });
     }
 
     function pickTargetRowIndex(rows, revitId) {
@@ -657,13 +788,16 @@
                 return;
             }
 
-            model.getBulkProperties([dbId], { propFilter: ['ElementId', 'Element ID', 'Element_ID', 'Revit Element ID'] }, function (results) {
+            // No propFilter: propFilter for ElementId/'Revit Element ID' is unreliable and can
+            // return 0 results depending on the model (display name varies by translation) —
+            // fetch everything and loosely match the property name instead.
+            model.getBulkProperties([dbId], {}, function (results) {
                 var revitId = null;
                 if (results && results[0] && Array.isArray(results[0].properties)) {
                     for (var i = 0; i < results[0].properties.length; i++) {
                         var p = results[0].properties[i];
                         var n = String(p.displayName || '').toLowerCase();
-                        if (n.indexOf('element') >= 0 && n.indexOf('id') >= 0) {
+                        if (n.indexOf('elementid') >= 0 || n.indexOf('element id') >= 0 || n.indexOf('element_id') >= 0) {
                             revitId = String(p.displayValue || '');
                             break;
                         }
@@ -687,12 +821,12 @@
         var out = [];
 
         // Most reliable source for multi-model picking.
-        var agg = (window.viewer && viewer.getAggregateSelection) ? viewer.getAggregateSelection() : null;
+        var agg = (hasViewer() && viewer.getAggregateSelection) ? viewer.getAggregateSelection() : null;
         if (agg && agg.length > 0) {
             agg.forEach(function (sel) {
                 var ids = sel.selection || sel.dbIdArray || sel.ids || [];
                 ids.forEach(function (id) {
-                    out.push({ dbId: id, model: sel.model || (window.viewer && window.viewer.model) });
+                    out.push({ dbId: id, model: sel.model || (hasViewer() && viewer.model) });
                 });
             });
             if (out.length > 0) return out;
@@ -700,7 +834,7 @@
 
         if (!isAggregate) {
             if (!event || !event.dbIdArray || event.dbIdArray.length === 0) return out;
-            out.push({ dbId: event.dbIdArray[0], model: event.model || (window.viewer && window.viewer.model) });
+            out.push({ dbId: event.dbIdArray[0], model: event.model || (hasViewer() && viewer.model) });
             return out;
         }
 
@@ -708,7 +842,7 @@
         var first = event.selections[0];
         var list = first.dbIdArray || first.selection || first.ids || [];
         if (!list.length) return out;
-        out.push({ dbId: list[0], model: first.model || (window.viewer && window.viewer.model) });
+        out.push({ dbId: list[0], model: first.model || (hasViewer() && viewer.model) });
         return out;
     }
 
@@ -729,23 +863,28 @@
             return;
         }
 
-        // Theme the picked object immediately so the user gets visible feedback
-        // even before the Revit-ID lookup / row coloring finishes.
-        (picksToColor || [pick]).forEach(function (p) {
-            colorPickedElement(p.model, p.dbId);
-        });
-
         resolveRevitId(pick.model, pick.dbId).then(function (revitId) {
             var targetIdx = pickTargetRowIndex(rows, revitId);
             if (targetIdx < 0 || !rows[targetIdx]) {
+                // No matching row for this element — don't tint it, there'd be nothing to undo later.
                 setStatus('Select a row in the left panel first.');
                 return;
             }
 
+            // Theme the picked object now that we know it maps to a real row, so the user
+            // gets visible feedback even before the async row-coloring below finishes.
+            (picksToColor || [pick]).forEach(function (p) {
+                colorPickedElement(p.model, p.dbId);
+            });
+
+            var snapshotNumber = state.currentNumber;
+            var snapshotAlpha = state.alphaCurrent;
             var value = nextValue();
             rows[targetIdx].newValue = value;
             rows[targetIdx].__reorderOrdinal = state.assignmentCounter++;
+            (rows[targetIdx].revitIds || []).forEach(function (rid) { state.assignedRevitIds.add(String(rid)); });
             state.activeRowIndex = targetIdx;
+            state.lastAssignment = { rowIndex: targetIdx, prevNumber: snapshotNumber, prevAlphaCurrent: snapshotAlpha };
             syncInputAt(targetIdx, value);
             advanceTarget(rows);
 
@@ -773,6 +912,10 @@
             return;
         }
 
+        if (window.BulkAssignController && window.BulkAssignController.isEnabled && window.BulkAssignController.isEnabled()) {
+            window.BulkAssignController.disable();
+        }
+
         ensureModal();
         parseSeed(document.getElementById('reorderSeed').value);
         var stepValue = parseInt(document.getElementById('reorderStep').value, 10);
@@ -792,8 +935,8 @@
         setButtonState(true);
         updatePreview();
 
-        if (window.viewer && typeof window.viewer.showAll === 'function') {
-            window.viewer.showAll();
+        if (hasViewer() && typeof viewer.showAll === 'function') {
+            viewer.showAll();
             clearViewerHighlights();
             resetRevitColorCache();
         }
@@ -807,10 +950,11 @@
         state.colorEpoch += 1; // cancel any pending delayed recolor callbacks
         state.lastPickKey = '';
         state.lastPickAt = 0;
+        state.lastAssignment = null;
         state.pickedEntries.clear();
         resetRevitColorCache();
         state.dbIdToRevitId = new Map();
-        if (window.viewer) {
+        if (hasViewer()) {
             clearViewerHighlights();
             if (typeof viewer.clearSelection === 'function') {
                 viewer.clearSelection();
@@ -828,19 +972,41 @@
         if (!state.enabled) return;
         applyViewerSelectionColor();
         var picks = getPickEntries(event, !!isAggregate);
-        // Color directly from event payload so the picked element turns green
-        // even when viewer.getSelection()/getAggregateSelection lags this event tick.
-        picks.forEach(function (p) {
-            colorPickedElement(p.model, p.dbId);
-        });
-        // Keep the previous path as fallback for viewer implementations that may
-        // not include all ids in the event payload.
-        colorCurrentSelectionNow();
+
+        // Clicking empty space / background clears the native selection — don't touch
+        // existing assignments for that (only an explicit re-click on a picked element should).
+        if (picks.length === 0) return;
+
         var pick = extractPick(event, !!isAggregate);
         if (!pick) return;
-        if (isDuplicatePick(pick)) return;
-        assignFromViewerPick(pick, picks);
+        if (isDuplicatePick(pick)) return; // debounce duplicate SELECTION_CHANGED + AGGREGATE events for one click
+
+        // Elements can span multiple fragments/dbIds (e.g. a long duct run made of several
+        // segments) that all get colored together as one row. So "already picked" must be
+        // decided by the RevitID the click resolves to (via our own assignedRevitIds tracking,
+        // not row.__reorderOrdinal which isn't reliable to read back off the shared rows array).
+        resolveRevitId(pick.model, pick.dbId).then(function (revitId) {
+            var alreadyAssignedRow = anyRevitIdAssigned(revitId);
+
+            if (alreadyAssignedRow) {
+                handleDeselectPick(pick);
+                return;
+            }
+
+            // The viewer's own click handling can echo a deselect with an immediate re-select
+            // of the same element (no new user click involved). Swallow that one echo so a
+            // manual deselect doesn't get instantly reassigned.
+            if (revitId && revitId === state.justDeselectedRevitId && (Date.now() - state.justDeselectedAt) < 800) {
+                state.justDeselectedRevitId = null;
+                return;
+            }
+
+            // Tinting happens inside assignFromViewerPick, only once a matching row is confirmed —
+            // otherwise elements with no row match would turn green with nothing to ever clear them.
+            assignFromViewerPick(pick, picks);
+        });
     }
+
 
     // Global entry point used by the Reorder button.
     window.viewerReorder = function () {
