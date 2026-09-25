@@ -180,6 +180,8 @@ function closeViewerModal() {
         window.ReorderController.disable();
     }
 
+    if (window.ElementTags) window.ElementTags.reset();
+
     window._pendingParamEditRows = [];
     window._pendingDAFileContexts = null;
     window._pendingDAFileContext = null;

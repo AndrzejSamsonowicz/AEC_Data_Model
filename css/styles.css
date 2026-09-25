@@ -1621,3 +1621,32 @@ body {
     color: #fff;
     border-color: #0696d7;
 }
+
+/* Element tags: HTML labels anchored to viewer elements (js/tags.js) */
+#viewerTagsBtn.tags-active {
+    background: #0696d7 !important;
+    border-color: #3db7ea !important;
+}
+
+.element-tag-layer {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    pointer-events: none;
+    z-index: 5;
+}
+
+.element-tag {
+    position: absolute;
+    left: 0;
+    top: -6px;
+    padding: 2px 7px;
+    background: rgba(20, 24, 30, 0.88);
+    color: #fff;
+    border-left: 4px solid #0696d7;
+    border-radius: 3px;
+    font: 600 11px/1.4 system-ui, sans-serif;
+    white-space: nowrap;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+    will-change: transform;
+}

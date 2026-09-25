@@ -465,9 +465,11 @@
             var row = rows[idx];
             if (!row) return;
             row.newValue = value;
+            row.__tagColor = state.selectedColor;
             syncInputAt(idx, value);
             count += 1;
         });
+        if (window.ElementTags) window.ElementTags.refresh();
         setStatus('Applied "' + value + '" to ' + count + ' row(s).');
     }
 

@@ -881,12 +881,14 @@
             var snapshotAlpha = state.alphaCurrent;
             var value = nextValue();
             rows[targetIdx].newValue = value;
+            rows[targetIdx].__tagColor = state.selectedColor;
             rows[targetIdx].__reorderOrdinal = state.assignmentCounter++;
             (rows[targetIdx].revitIds || []).forEach(function (rid) { state.assignedRevitIds.add(String(rid)); });
             state.activeRowIndex = targetIdx;
             state.lastAssignment = { rowIndex: targetIdx, prevNumber: snapshotNumber, prevAlphaCurrent: snapshotAlpha };
             syncInputAt(targetIdx, value);
             advanceTarget(rows);
+            if (window.ElementTags) window.ElementTags.refresh();
 
             var rowName = rows[targetIdx].paramName || ('Row ' + (targetIdx + 1));
             var ridText = revitId ? (' (ElementId ' + revitId + ')') : '';
