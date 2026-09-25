@@ -1759,6 +1759,8 @@ async function _peSubmitMultiFileDA(fileBatches, session) {
                 succeeded++;
             } else {
                 var wiMsg = 'WorkItem ' + wi.status;
+                if (wi.reportExcerpt) wiMsg += '\n\nFrom the report:\n' + wi.reportExcerpt;
+                if (wi.reportFile) wiMsg += '\n\nFull report saved to ' + wi.reportFile;
                 if (wi.reportUrl) wiMsg += '\nReport: ' + wi.reportUrl;
                 errors.push({ file: ctx.fileName, msg: wiMsg });
             }
@@ -1868,6 +1870,8 @@ function _pePollWorkItem(workItemId, submitData, attempt) {
                 }
             } else {
                 var msg = 'WorkItem ' + status + '.';
+                if (wi.reportExcerpt) msg += '\n\nFrom the report:\n' + wi.reportExcerpt;
+                if (wi.reportFile) msg += '\n\nFull report saved to ' + wi.reportFile;
                 if (wi.reportUrl) msg += '\n\nView report: ' + wi.reportUrl;
                 _peShowDAProgress(null, msg, wi.reportUrl);
             }

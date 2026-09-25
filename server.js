@@ -82,7 +82,10 @@ app.get('/api/settings', (req, res) => {
 app.post('/api/settings', (req, res) => {
     const { clientId, clientSecret, callbackUrl, region } = req.body;
     
+    // Merge, don't replace: server-settings.json also holds DA keys (revitEngine, cloudRegion,
+    // rcmCloudPathMaxRevit, …) that the Settings dialog doesn't send.
     settings = {
+        ...settings,
         clientId: clientId || settings.clientId,
         clientSecret: clientSecret || settings.clientSecret,
         callbackUrl: callbackUrl || settings.callbackUrl,
@@ -1386,12 +1389,17 @@ app.post('/api/da/submit', async (req, res) => {
         const hasCloudGuids      = !!(projectGuid && modelGuid);
         const revitVerNum        = parseInt(revitProjectVersion || '0', 10);
 
-        // Route singleuser RCM to cloud path (SaveCloudModel) only when DA engine supports it.
-        // Revit 2026 DA engine: cloud path works for RCM.
-        // Revit 2027 DA engine: cloud path fails with failedInstructions (newly released, not yet supported).
+        // Route singleuser RCM to cloud path (SaveCloudModel) only up to rcmCloudPathMaxRevit.
+        // The cloud path updates the original item in place. The download/upload path can't:
+        // Data Management refuses new versions on C4RModel items, so finalize has to create a
+        // new "<name>_updated" file instead.
+        // Verified on the Revit 2026 and 2027 DA engines (2027 failed once shortly after its
+        // release, but works as of Sep 2026). For newer engines, raise "rcmCloudPathMaxRevit" in
+        // server-settings.json once verified (read on every submit, no restart needed).
         // Without cloud GUIDs: download/upload regardless of version.
+        const rcmCloudPathMaxRevit = parseInt(loadSettings().rcmCloudPathMaxRevit, 10) || 2027;
         const rcmCloudPathSupported = modelType === 'singleuser' && hasCloudGuids
-            && revitVerNum > 0 && revitVerNum <= 2026;
+            && revitVerNum > 0 && revitVerNum <= rcmCloudPathMaxRevit;
 
         const isSingleUser = (modelType === 'singleuser' && !rcmCloudPathSupported)
             || (!hasCloudGuids && !!storageUrnForCheck);
@@ -1399,7 +1407,7 @@ app.post('/api/da/submit', async (req, res) => {
         const cloudPathType = isSingleUser ? 'DOWNLOAD/UPLOAD'
             : modelType === 'singleuser' ? `CLOUD MODEL (SaveCloudModel — RCM ${revitVerNum})`
             : 'CLOUD MODEL (SynchronizeWithCentral — C4R)';
-        console.log(`DA: isSingleUser=${isSingleUser} (modelType="${modelType}", revit=${revitVerNum}, hasCloudGuids=${hasCloudGuids}) → ${cloudPathType}`);
+        console.log(`DA: isSingleUser=${isSingleUser} (modelType="${modelType}", revit=${revitVerNum}, hasCloudGuids=${hasCloudGuids}, rcmCloudPathMaxRevit=${rcmCloudPathMaxRevit}) → ${cloudPathType}`);
 
         // Apply settings GUID fallback ONLY for genuine cloud model path.
         if (!isSingleUser) {
@@ -1554,6 +1562,40 @@ app.post('/api/da/submit', async (req, res) => {
 });
 
 // GET /api/da/workitem/:id
+// ── Design Automation reports ────────────────────────────────────────────────
+// Reports are only downloadable from DA for a limited time, so each finished workitem's report
+// is saved once to da-reports/<workItemId>.txt.
+const DA_REPORTS_DIR = path.join(__dirname, 'da-reports');
+const DA_FAIL_STATES = ['failedDownload', 'failedInstructions', 'failedUpload', 'failedLimitDataSize',
+                        'failedLimitProcessingTime', 'failed', 'cancelled'];
+const daReportCache = new Map(); // workItemId → { file, excerpt }
+
+// The lines that explain a failure: the add-in's own [UpdateParams] trace plus errors/exceptions.
+function extractReportExcerpt(text, maxLines = 15) {
+    const interesting = String(text).split(/\r?\n/)
+        .map(l => l.trim())
+        .filter(l => l && /\[UpdateParams\]|error|exception|fatal|failed/i.test(l));
+    return interesting.slice(-maxLines).map(l => (l.length > 240 ? l.slice(0, 240) + '…' : l)).join('\n');
+}
+
+async function saveDAReport(wiData) {
+    if (daReportCache.has(wiData.id)) return daReportCache.get(wiData.id);
+    const rptResp = await axios.get(wiData.reportUrl, { responseType: 'text' });
+    const text = String(rptResp.data);
+    fs.mkdirSync(DA_REPORTS_DIR, { recursive: true });
+    const file = `da-reports/${wiData.id}.txt`;
+    fs.writeFileSync(path.join(__dirname, file),
+        `WorkItem ${wiData.id} — status=${wiData.status} — saved ${new Date().toISOString()}\n\n${text}`);
+    const saved = { file, excerpt: extractReportExcerpt(text) };
+    daReportCache.set(wiData.id, saved);
+    if (DA_FAIL_STATES.includes(wiData.status)) {
+        console.log(`\n===== DA REPORT (${wiData.id}) status=${wiData.status} — saved to ${file} =====\n${text}\n=================================================\n`);
+    } else {
+        console.log(`DA: report for ${wiData.id} (${wiData.status}) saved to ${file}`);
+    }
+    return saved;
+}
+
 app.get('/api/da/workitem/:id', async (req, res) => {
     const sessionId = req.query.sessionId;
     if (!sessionId || !userTokens.has(sessionId)) return res.status(401).json({ error: 'Invalid session' });
@@ -1565,19 +1607,16 @@ app.get('/api/da/workitem/:id', async (req, res) => {
         });
         const wiData = wiResp.data;
 
-        // Auto-fetch and log the report whenever a workitem reaches a terminal failure state
-        const failStates = ['failedDownload', 'failedInstructions', 'failedUpload', 'failed', 'cancelled'];
-        if (failStates.includes(wiData.status) && wiData.reportUrl) {
-            // Only fetch once (check if already fetched by looking at a flag on the object)
-            if (!wiData.__reportFetched) {
-                setImmediate(async () => {
-                    try {
-                        const rptResp = await axios.get(wiData.reportUrl, { responseType: 'text' });
-                        console.log(`\n===== DA REPORT (${wiData.id}) status=${wiData.status} =====\n${rptResp.data}\n=================================================\n`);
-                    } catch (rptErr) {
-                        console.warn(`DA: Could not fetch report for ${wiData.id}: ${rptErr.message}`);
-                    }
-                });
+        // Once a workitem finishes, save its report to da-reports/ (kept across restarts) and,
+        // for failures, return the key lines so the UI can show why it failed.
+        const isFailure = DA_FAIL_STATES.includes(wiData.status);
+        if ((isFailure || wiData.status === 'success') && wiData.reportUrl) {
+            try {
+                const saved = await saveDAReport(wiData);
+                wiData.reportFile = saved.file;
+                if (isFailure) wiData.reportExcerpt = saved.excerpt;
+            } catch (rptErr) {
+                console.warn(`DA: Could not fetch report for ${wiData.id}: ${rptErr.message}`);
             }
         }
 
