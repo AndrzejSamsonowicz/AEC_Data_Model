@@ -690,6 +690,7 @@
         });
 
         var panel = document.getElementById('paramEditPanel');
+        if (window._peTableState) { window._peTableState.sort = null; window._peTableState.fileSort = {}; } // show the list's new order
         if (panel && typeof _peRenderParamTable === 'function') {
             _peRenderParamTable(panel, rows);
             setStatus('Reordered list by assignment sequence.');

@@ -730,7 +730,9 @@ window._peTableState = window._peTableState || {
     lastClick: -1,
     dragSrc: -1,
     cellSelected: new Set(), // Set<number> — selected "New Value" cell indices
-    lastCellClick: -1
+    lastCellClick: -1,
+    sort: null,              // { col: 'element'|'param'|'current'|'newValue', dir: 1|-1 } — all files, display only
+    fileSort: {}             // fileName → { col, dir } — overrides `sort` for that file group
 };
 var _peDragHandleDown = false;
 var _peHighlightTimer = null;
@@ -761,6 +763,8 @@ function populateParamEditPanel() {
     st.dragSrc = -1;
     st.cellSelected = new Set();
     st.lastCellClick = -1;
+    st.sort = null;
+    st.fileSort = {};
     window._peRevitDbIdCache = null;   // clear scan cache whenever new rows are loaded
     window._peViewerRevitIds = null;    // clear viewer ID index so it rebuilds on next scan
     window._peDbIdToRevitId  = null;    // clear reverse dbId→revitId map
@@ -790,6 +794,7 @@ function _peRenderParamTable(panel, rows) {
             return fa !== fb ? fa - fb : a - b; // stable within each file group
         });
     }
+    if (_peAnySortActive()) displayOrder = _peSortDisplayOrder(rows, displayOrder, _peEffectiveSort);
 
     let html = '<div style="overflow-x:hidden;margin-bottom:2px;">';
     html += '<table id="peParamTable" style="width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed;font-family:\'ArtifaktElement\',\'Helvetica Neue\',Arial,sans-serif;">';
@@ -797,14 +802,16 @@ function _peRenderParamTable(panel, rows) {
     html += '<thead><tr style="background:#0696d7;color:white;user-select:none;letter-spacing:0.01em;">';
     html += '<th style="padding:7px 3px;"></th>';
     html += '<th style="padding:7px 0;text-align:center;"><input type="checkbox" id="peVisAll" title="Show / hide all elements in the viewer" style="margin:0;cursor:pointer;accent-color:#0696d7;"></th>';
-    html += '<th style="padding:7px 6px;text-align:left;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;position:relative;">Element<div class="pe-col-resize" style="position:absolute;right:0;top:0;width:5px;height:100%;cursor:col-resize;z-index:1;"></div></th>';
-    html += '<th style="padding:7px 6px;text-align:left;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;position:relative;">Parameter<div class="pe-col-resize" style="position:absolute;right:0;top:0;width:5px;height:100%;cursor:col-resize;z-index:1;"></div></th>';
-    html += '<th style="padding:7px 6px;text-align:left;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;position:relative;">Current<div class="pe-col-resize" style="position:absolute;right:0;top:0;width:5px;height:100%;cursor:col-resize;z-index:1;"></div></th>';
-    html += '<th style="padding:7px 6px;text-align:left;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;position:relative;">New Value<div class="pe-col-resize" style="position:absolute;right:0;top:0;width:5px;height:100%;cursor:col-resize;z-index:1;"></div></th>';
+    // Sortable headers: click → ascending, again → descending, third click → original order.
+    [['element', 'Element'], ['param', 'Parameter'], ['current', 'Current'], ['newValue', 'New Value']].forEach(function(c) {
+        const arrow = st.sort && st.sort.col === c[0] ? (st.sort.dir > 0 ? ' \u25b2' : ' \u25bc') : '';
+        html += '<th class="pe-sort-th" data-sort="' + c[0] + '" title="Sort by ' + c[1] + ' (click again to reverse; a third click restores the original order)" style="padding:7px 6px;text-align:left;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;position:relative;cursor:pointer;">'
+             + c[1] + '<span style="font-size:9px;">' + arrow + '</span><div class="pe-col-resize" style="position:absolute;right:0;top:0;width:5px;height:100%;cursor:col-resize;z-index:1;"></div></th>';
+    });
     html += '</tr></thead>';
     html += '<tbody id="peParamTbody">';
     var lastFileName = null;
-    displayOrder.forEach(function(i) {
+    displayOrder.forEach(function(i, pos) {
         var row = rows[i];
         // Insert a file separator row when the file changes (multi-file mode)
         if (isMultiFile) {
@@ -815,13 +822,14 @@ function _peRenderParamTable(panel, rows) {
                       + '<td class="pe-vis-cell" colspan="2" style="padding:5px 0 5px 23px;background:#e8f4fb;border-bottom:1px solid #b3d9f0;">'
                       + '<input type="checkbox" class="pe-vis-cb" data-file="' + _peEscapeHtml(rowFile) + '" title="Show / hide all elements of this file in the viewer" style="margin:0;cursor:pointer;accent-color:#0696d7;"></td>'
                       + '<td colspan="4" style="padding:5px 8px 5px 2px;background:#e8f4fb;color:#0d6ea0;font-size:11px;font-weight:600;'
-                      + 'border-bottom:1px solid #b3d9f0;letter-spacing:0.03em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'
+                      + 'letter-spacing:0.03em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'
                       + '\uD83D\uDCC2 ' + _peEscapeHtml(rowFile)
-                      + '</td></tr>';
+                      + '</td></tr>'
+                      + _peFileSortRowHtml(rowFile);
             }
         }
         const isSel = st.selected.has(i);
-        const bg = isSel ? '#e3f4fc' : (i % 2 === 0 ? '#ffffff' : '#f4f7f9');
+        const bg = isSel ? '#e3f4fc' : (pos % 2 === 0 ? '#ffffff' : '#f4f7f9'); // stripes follow the displayed order
         const bleft = isSel ? '3px solid #0696d7' : '3px solid transparent';
         const isCellSel = st.cellSelected.has(i);
         const cellBg = isCellSel ? '#e3f4fc' : '#ffffff';
@@ -1023,7 +1031,21 @@ async function _peFillElementNames() {
     try { await _peEnsureRevitDbIdCache(models); }
     catch (err) { console.warn('Element names: lookup failed —', err.message); return; }
     const rows = window._pendingParamEditRows || [];
-    rows.forEach(function(r) { if (r) r.__elementName = _peElementDisplayName(r); });
+    let changed = false;
+    rows.forEach(function(r) {
+        if (!r) return;
+        const name = _peElementDisplayName(r);
+        if (r.__elementName !== name) { r.__elementName = name; changed = true; }
+    });
+    const st = window._peTableState;
+    // Sorted by Element: new names change the order. Only re-render when a name actually changed —
+    // every render starts a name fill, so re-rendering unconditionally would loop forever.
+    const sortsByElement = (st.sort && st.sort.col === 'element') ||
+        Object.keys(st.fileSort || {}).some(function(f) { return st.fileSort[f].col === 'element'; });
+    if (changed && sortsByElement) {
+        _peRenderParamTable(document.getElementById('paramEditPanel'), rows);
+        return;
+    }
     document.querySelectorAll('#peParamTbody td.pe-elname-cell').forEach(function(td) {
         const row = rows[parseInt(td.dataset.idx, 10)];
         if (!row) return;
@@ -1067,10 +1089,133 @@ function _peRefreshVisibilityControls() {
     setBox(document.getElementById('peVisAll'), rows);
 }
 
+// Row indices (into _pendingParamEditRows) in the order the table shows them — file grouping
+// and column sorting included. Keyboard navigation, ranges, paste, Fill Down and copy follow it.
+function _peDisplayOrder() {
+    return Array.from(document.querySelectorAll('#peParamTbody tr.pe-param-row')).map(function(tr) { return parseInt(tr.dataset.idx, 10); });
+}
+
+// Indices shown between two rows (inclusive), in display order.
+function _peDisplayRange(a, b) {
+    const order = _peDisplayOrder();
+    const pa = order.indexOf(a), pb = order.indexOf(b);
+    if (pa < 0 || pb < 0) return [a, b].filter(function(i) { return i >= 0; });
+    return order.slice(Math.min(pa, pb), Math.max(pa, pb) + 1);
+}
+
+// ── Column sorting (display order only) ──────────────────────────────────────
+// The underlying rows array keeps its order — Reorder ("Reorder in List"), Bulk Assign and the
+// data-idx lookups depend on it. Rows are sorted within their file group; empty values go last;
+// natural order so "test-2" < "test-10"; ties keep the original order.
+function _peSortValue(row, col) {
+    const v = col === 'element' ? row.__elementName
+            : col === 'param' ? row.paramName
+            : col === 'current' ? row.currentValue
+            : row.newValue;
+    return String(v == null ? '' : v).trim();
+}
+
+// The sort applied to one file group: its own (fileSort) or the all-files sort.
+function _peEffectiveSort(fileName) {
+    const st = window._peTableState;
+    return (st.fileSort && st.fileSort[fileName]) || st.sort || null;
+}
+
+function _peAnySortActive() {
+    const st = window._peTableState;
+    return !!st.sort || Object.keys(st.fileSort || {}).length > 0;
+}
+
+// Per-file sort row, directly below a file's name row: one sort label in each column's cell, so
+// the labels line up with (and resize with) the Element / Parameter / Current / New Value
+// columns. The file's own sort is bold + underlined; a sort inherited from the top header shows
+// a lighter arrow.
+function _peFileSortRowHtml(fileName) {
+    const st = window._peTableState;
+    const own = st.fileSort && st.fileSort[fileName];
+    const eff = _peEffectiveSort(fileName);
+    const cell = 'background:#f1f8fd;border-bottom:1px solid #b3d9f0;';
+    let html = '<tr class="pe-file-sortrow" data-file="' + _peEscapeHtml(fileName) + '">'
+             + '<td colspan="2" style="' + cell + 'padding:2px 0;"></td>';
+    [['element', 'Element'], ['param', 'Parameter'], ['current', 'Current'], ['newValue', 'New Value']].forEach(function(c) {
+        const active = eff && eff.col === c[0];
+        const arrow = active ? (eff.dir > 0 ? '▲' : '▼') : '';
+        html += '<td style="' + cell + 'padding:2px 7px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;color:#3f7ea6;">'
+              + '<span class="pe-file-sort-link" data-file="' + _peEscapeHtml(fileName) + '" data-sort="' + c[0] + '"'
+              + ' title="Sort only ' + _peEscapeHtml(fileName) + ' by ' + c[1] + ' (again: reverse; third click: back to the default)"'
+              + ' style="cursor:pointer;' + (own && active ? 'font-weight:700;text-decoration:underline;' : 'font-weight:500;') + '">'
+              + c[1] + (arrow ? '<span style="font-size:8px;margin-left:2px;' + (own ? '' : 'opacity:0.5;') + '">' + arrow + '</span>' : '')
+              + '</span></td>';
+    });
+    return html + '</tr>';
+}
+
+function _peSortDisplayOrder(rows, displayOrder, sortForFile) {
+    const rank = new Map(displayOrder.map(function(idx, pos) { return [idx, pos]; }));
+    const fileOf = function(i) { return rows[i].fileContext?.fileName || ''; };
+    const fileRank = new Map();
+    displayOrder.forEach(function(i) { if (!fileRank.has(fileOf(i))) fileRank.set(fileOf(i), fileRank.size); });
+    return displayOrder.slice().sort(function(a, b) {
+        const fa = fileRank.get(fileOf(a)), fb = fileRank.get(fileOf(b));
+        if (fa !== fb) return fa - fb;
+        const sort = sortForFile(fileOf(a)); // same file group from here on
+        if (!sort) return rank.get(a) - rank.get(b);
+        const va = _peSortValue(rows[a], sort.col), vb = _peSortValue(rows[b], sort.col);
+        if (!va !== !vb) return va ? -1 : 1; // empty last, whatever the direction
+        const c = va.localeCompare(vb, undefined, { numeric: true, sensitivity: 'base' });
+        return c !== 0 ? c * sort.dir : rank.get(a) - rank.get(b);
+    });
+}
+
+// Before a drag-and-drop in a sorted table: make the displayed order the real order (rows array
+// rewritten in place), clear the sort, and return an old → new index map.
+function _peMaterializeSortedOrder() {
+    const st = window._peTableState;
+    const rows = window._pendingParamEditRows || [];
+    const order = Array.from(document.querySelectorAll('#peParamTbody tr.pe-param-row')).map(function(tr) { return parseInt(tr.dataset.idx, 10); });
+    if (!_peAnySortActive() || order.length !== rows.length) return null;
+    const map = new Map(order.map(function(oldIdx, newIdx) { return [oldIdx, newIdx]; }));
+    const reordered = order.map(function(i) { return rows[i]; });
+    rows.length = 0;
+    reordered.forEach(function(r) { rows.push(r); });
+    const remap = function(set) { return new Set(Array.from(set).map(function(i) { return map.has(i) ? map.get(i) : i; })); };
+    st.selected = remap(st.selected);
+    st.cellSelected = remap(st.cellSelected);
+    st.sort = null;
+    st.fileSort = {};
+    return map;
+}
+
 function _peBindTableEvents() {
     const tbody = document.getElementById('peParamTbody');
     if (!tbody) return;
     const st = window._peTableState;
+
+    // ── Sortable column headers ──────────────────────────────────────────────
+    document.querySelectorAll('#peParamTable th.pe-sort-th').forEach(function(th) {
+        th.addEventListener('click', function(e) {
+            if (e.target.closest('.pe-col-resize')) return; // column resize, not a sort click
+            const col = th.dataset.sort;
+            if (!st.sort || st.sort.col !== col) st.sort = { col: col, dir: 1 };
+            else if (st.sort.dir === 1) st.sort = { col: col, dir: -1 };
+            else st.sort = null;
+            st.fileSort = {}; // the top header sorts every file
+            _peRenderParamTable(document.getElementById('paramEditPanel'), window._pendingParamEditRows || []);
+        });
+    });
+
+    // ── Per-file sort links in file header rows ──────────────────────────────
+    tbody.addEventListener('click', function(e) {
+        const link = e.target.closest('.pe-file-sort-link');
+        if (!link) return;
+        const file = link.dataset.file, col = link.dataset.sort;
+        st.fileSort = st.fileSort || {};
+        const own = st.fileSort[file];
+        if (!own || own.col !== col) st.fileSort[file] = { col: col, dir: 1 };
+        else if (own.dir === 1) st.fileSort[file] = { col: col, dir: -1 };
+        else delete st.fileSort[file]; // back to the top header's sort / original order
+        _peRenderParamTable(document.getElementById('paramEditPanel'), window._pendingParamEditRows || []);
+    });
 
     // ── Visibility checkboxes (row, file header, table header) ───────────────
     // File header checkbox → all rows of that file.
@@ -1131,10 +1276,8 @@ function _peBindTableEvents() {
         if (td) {
             if (e.shiftKey && st.lastCellClick >= 0) {
                 e.preventDefault();
-                const lo = Math.min(st.lastCellClick, idx);
-                const hi = Math.max(st.lastCellClick, idx);
                 if (!e.ctrlKey && !e.metaKey) st.cellSelected.clear();
-                for (let i = lo; i <= hi; i++) st.cellSelected.add(i);
+                _peDisplayRange(st.lastCellClick, idx).forEach(function(i) { st.cellSelected.add(i); });
             } else {
                 st.cellSelected.clear();
                 st.cellSelected.add(idx);
@@ -1150,10 +1293,8 @@ function _peBindTableEvents() {
         // Row click (parameter / current value columns)
         e.preventDefault();
         if (e.shiftKey && st.lastClick >= 0) {
-            const lo = Math.min(st.lastClick, idx);
-            const hi = Math.max(st.lastClick, idx);
             if (!e.ctrlKey && !e.metaKey) st.selected.clear();
-            for (let i = lo; i <= hi; i++) st.selected.add(i);
+            _peDisplayRange(st.lastClick, idx).forEach(function(i) { st.selected.add(i); });
         } else if (e.ctrlKey || e.metaKey) {
             if (st.selected.has(idx)) st.selected.delete(idx);
             else st.selected.add(idx);
@@ -1189,9 +1330,11 @@ function _peBindTableEvents() {
         if (lines.length <= 1) return; // single value — let browser paste normally
         e.preventDefault();
         const rows = window._pendingParamEditRows || [];
+        const order = _peDisplayOrder();
+        const start = order.indexOf(idx);
         lines.forEach(function(line, offset) {
-            const ti = idx + offset;
-            if (ti >= rows.length) return;
+            const ti = order[start + offset];
+            if (start < 0 || ti === undefined || !rows[ti]) return;
             rows[ti].newValue = line;
             const inp = tbody.querySelector('.pe-new-input[data-idx="' + ti + '"]');
             if (inp) inp.value = line;
@@ -1244,8 +1387,11 @@ function _peBindTableEvents() {
         tbody.querySelectorAll('tr.pe-param-row').forEach(function(r) { r.style.boxShadow = ''; r.style.opacity = ''; });
         const tr = e.target.closest('tr.pe-param-row');
         if (!tr || st.dragSrc < 0) return;
-        const destIdx = parseInt(tr.dataset.idx, 10);
+        let destIdx = parseInt(tr.dataset.idx, 10);
         if (isNaN(destIdx)) return;
+        // Sorted table: the displayed order becomes the real order before the move is applied.
+        const sortMap = _peMaterializeSortedOrder();
+        if (sortMap) { destIdx = sortMap.get(destIdx); st.dragSrc = sortMap.get(st.dragSrc); }
         const rows = window._pendingParamEditRows || [];
 
         // Determine which rows to move: all selected when dragSrc is part of selection
@@ -1366,16 +1512,14 @@ function _peKeyHandler(e) {
                 e.stopPropagation();
                 if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
 
-                var selected = stNav.selected ? Array.from(stNav.selected).sort(function(a, b) { return a - b; }) : [];
-                var idx = selected.length ? selected[selected.length - 1] : -1;
-
-                if (e.key === 'ArrowUp') {
-                    if (idx < 0) idx = rowsNav.length;
-                    idx = Math.max(0, idx - 1);
-                } else {
-                    if (idx < 0) idx = -1;
-                    idx = Math.min(rowsNav.length - 1, idx + 1);
-                }
+                // Step through the rows as displayed (file grouping and column sorting included).
+                var order = _peDisplayOrder();
+                var positions = stNav.selected ? Array.from(stNav.selected).map(function(i) { return order.indexOf(i); }).filter(function(p) { return p >= 0; }) : [];
+                var pos = positions.length ? (e.key === 'ArrowUp' ? Math.min.apply(null, positions) : Math.max.apply(null, positions)) : -1;
+                if (e.key === 'ArrowUp') pos = pos < 0 ? order.length - 1 : Math.max(0, pos - 1);
+                else pos = pos < 0 ? 0 : Math.min(order.length - 1, pos + 1);
+                var idx = order[pos];
+                if (idx === undefined) return;
 
                 stNav.selected = new Set([idx]);
                 stNav.cellSelected.clear();
@@ -1398,7 +1542,8 @@ function _peKeyHandler(e) {
         const st = window._peTableState;
         if (st.cellSelected.size === 0) return;
         const rows = window._pendingParamEditRows || [];
-        const text = Array.from(st.cellSelected).sort(function(a, b) { return a - b; })
+        const order = _peDisplayOrder();
+        const text = order.filter(function(i) { return st.cellSelected.has(i); })
             .map(function(i) { return rows[i] ? (rows[i].newValue || '') : ''; }).join('\n');
         navigator.clipboard.writeText(text).catch(function() {
             const ta = Object.assign(document.createElement('textarea'), { value: text });
@@ -1415,10 +1560,10 @@ function _peKeyHandler(e) {
 function _peRefreshRowStyles() {
     const st = window._peTableState;
     const rows = window._pendingParamEditRows || [];
-    document.querySelectorAll('#peParamTbody tr.pe-param-row').forEach(function(tr) {
+    document.querySelectorAll('#peParamTbody tr.pe-param-row').forEach(function(tr, pos) {
         const i = parseInt(tr.dataset.idx, 10);
         const isSel = st.selected.has(i);
-        tr.style.background = isSel ? '#dceeff' : (i % 2 === 0 ? '#ffffff' : '#f6f8fb');
+        tr.style.background = isSel ? '#dceeff' : (pos % 2 === 0 ? '#ffffff' : '#f6f8fb');
         tr.style.borderLeft = isSel ? '3px solid #1565c0' : '3px solid transparent';
     });
     document.querySelectorAll('#peParamTbody td.pe-new-cell').forEach(function(td) {
@@ -1466,11 +1611,12 @@ function _peShowContextMenu(x, y, idx) {
     }
 
     menuItem('Fill Down', function() {
-        for (let i = idx; i < rows.length; i++) {
+        const order = _peDisplayOrder();
+        order.slice(Math.max(0, order.indexOf(idx))).forEach(function(i) {
             rows[i].newValue = val;
             const x = document.querySelector('#peParamTbody .pe-new-input[data-idx="' + i + '"]');
             if (x) x.value = val;
-        }
+        });
     }, !val);
 
     menuItem('Fill Selection (' + (st.cellSelected.size || 1) + ' cells)', function() {
