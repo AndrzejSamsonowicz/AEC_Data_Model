@@ -4,18 +4,18 @@
 (function () {
     var HEADER = 'Task Name';
 
-    // Unique values in assignment order: Reorder assignments first (by ordinal), then values that
-    // were typed or bulk-assigned (no ordinal), in table order. A repeated value (e.g. the same
-    // Bulk Assign value on many elements) becomes one task, positioned where it first appears.
+    // Tasks in exactly the order the Parameter Edit list shows (file grouping and any column
+    // sorting included), top to bottom. Rows without a New Value are skipped. A repeated value
+    // (e.g. the same Bulk Assign value on many elements) becomes one task, where it first appears.
     function collectTaskNames() {
         var rows = window._pendingParamEditRows || [];
-        var withValue = rows.filter(function (r) { return r && String(r.newValue || '').trim() !== ''; });
-        var ordered = withValue.filter(function (r) { return typeof r.__reorderOrdinal === 'number'; })
-            .sort(function (a, b) { return a.__reorderOrdinal - b.__reorderOrdinal; });
-        var unordered = withValue.filter(function (r) { return typeof r.__reorderOrdinal !== 'number'; });
+        var shown = Array.prototype.map.call(document.querySelectorAll('#peParamTbody tr.pe-param-row'),
+            function (tr) { return rows[parseInt(tr.dataset.idx, 10)]; });
+        var inOrder = shown.length === rows.length ? shown : rows; // table not rendered → array order
+        var withValue = inOrder.filter(function (r) { return r && String(r.newValue || '').trim() !== ''; });
         var seen = new Set();
         var names = [];
-        ordered.concat(unordered).forEach(function (r) {
+        withValue.forEach(function (r) {
             var v = String(r.newValue).trim();
             if (!seen.has(v)) { seen.add(v); names.push(v); }
         });
