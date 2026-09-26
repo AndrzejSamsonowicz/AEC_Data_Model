@@ -206,6 +206,11 @@ function closeViewerModal() {
 function viewerShowAll() {
     if (!viewer) return;
     const models = (viewer.getAllModels) ? viewer.getAllModels() : (viewer.model ? [viewer.model] : []);
+    // "Show All" means everything, so it also ticks every Parameter Edit visibility checkbox.
+    const wasHidden = (window._pendingParamEditRows || []).filter(function(r) { return r && r.__hidden; });
+    wasHidden.forEach(function(r) { delete r.__hidden; });
+    if (wasHidden.length && typeof _peApplyRowVisibility === 'function') _peApplyRowVisibility(wasHidden, false);
+    if (typeof _peRefreshVisibilityControls === 'function') _peRefreshVisibilityControls();
     viewer.showAll();
     models.forEach(m => viewer.clearThemingColors(m));
     const showAllBtn = document.getElementById('viewerShowAllBtn');
@@ -301,9 +306,11 @@ function loadModelsInViewer(viewerInstance, files) {
 
         extractViewerExternalIds();
         setupViewerToSidebarSync();
+        _peOnViewerModelsReady();
 
         const onTreeCreated = () => {
             console.log('Object tree created');
+            _peOnViewerModelsReady();
             viewerInstance.removeEventListener(Autodesk.Viewing.OBJECT_TREE_CREATED_EVENT, onTreeCreated);
             // Auto-isolate specific elements (triggered from PE "Show in Viewer").
             // Skip when the PE panel is active — _peIsolateWithFocus handles all
@@ -786,9 +793,11 @@ function _peRenderParamTable(panel, rows) {
 
     let html = '<div style="overflow-x:hidden;margin-bottom:2px;">';
     html += '<table id="peParamTable" style="width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed;font-family:\'ArtifaktElement\',\'Helvetica Neue\',Arial,sans-serif;">';
-    html += '<colgroup><col id="peParamCol0" style="width:20px"><col id="peParamCol1" style="width:35%"><col id="peParamCol2" style="width:25%"><col id="peParamCol3"></colgroup>';
+    html += '<colgroup><col id="peParamCol0" style="width:20px"><col id="peParamColVis" style="width:22px"><col id="peParamColName" style="width:26%"><col id="peParamCol1" style="width:24%"><col id="peParamCol2" style="width:20%"><col id="peParamCol3"></colgroup>';
     html += '<thead><tr style="background:#0696d7;color:white;user-select:none;letter-spacing:0.01em;">';
     html += '<th style="padding:7px 3px;"></th>';
+    html += '<th style="padding:7px 0;text-align:center;"><input type="checkbox" id="peVisAll" title="Show / hide all elements in the viewer" style="margin:0;cursor:pointer;accent-color:#0696d7;"></th>';
+    html += '<th style="padding:7px 6px;text-align:left;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;position:relative;">Element<div class="pe-col-resize" style="position:absolute;right:0;top:0;width:5px;height:100%;cursor:col-resize;z-index:1;"></div></th>';
     html += '<th style="padding:7px 6px;text-align:left;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;position:relative;">Parameter<div class="pe-col-resize" style="position:absolute;right:0;top:0;width:5px;height:100%;cursor:col-resize;z-index:1;"></div></th>';
     html += '<th style="padding:7px 6px;text-align:left;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;position:relative;">Current<div class="pe-col-resize" style="position:absolute;right:0;top:0;width:5px;height:100%;cursor:col-resize;z-index:1;"></div></th>';
     html += '<th style="padding:7px 6px;text-align:left;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;position:relative;">New Value<div class="pe-col-resize" style="position:absolute;right:0;top:0;width:5px;height:100%;cursor:col-resize;z-index:1;"></div></th>';
@@ -803,7 +812,9 @@ function _peRenderParamTable(panel, rows) {
             if (rowFile !== lastFileName) {
                 lastFileName = rowFile;
                 html += '<tr class="pe-file-separator" data-file="' + _peEscapeHtml(rowFile) + '">'
-                      + '<td colspan="4" style="padding:5px 8px;background:#e8f4fb;color:#0d6ea0;font-size:11px;font-weight:600;'
+                      + '<td class="pe-vis-cell" colspan="2" style="padding:5px 0 5px 23px;background:#e8f4fb;border-bottom:1px solid #b3d9f0;">'
+                      + '<input type="checkbox" class="pe-vis-cb" data-file="' + _peEscapeHtml(rowFile) + '" title="Show / hide all elements of this file in the viewer" style="margin:0;cursor:pointer;accent-color:#0696d7;"></td>'
+                      + '<td colspan="4" style="padding:5px 8px 5px 2px;background:#e8f4fb;color:#0d6ea0;font-size:11px;font-weight:600;'
                       + 'border-bottom:1px solid #b3d9f0;letter-spacing:0.03em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'
                       + '\uD83D\uDCC2 ' + _peEscapeHtml(rowFile)
                       + '</td></tr>';
@@ -816,8 +827,13 @@ function _peRenderParamTable(panel, rows) {
         const cellBg = isCellSel ? '#e3f4fc' : '#ffffff';
         const cellBorder = isCellSel ? '1px solid #0696d7' : '1px solid #d5dbe1';
         html += '<tr draggable="true" data-idx="' + i + '" class="pe-param-row"'
-             + ' style="background:' + bg + ';border-left:' + bleft + ';border-bottom:1px solid #d5dbe1;cursor:default;transition:background 0.1s;">';
+             + ' style="background:' + bg + ';border-left:' + bleft + ';border-bottom:1px solid #d5dbe1;cursor:default;transition:background 0.1s;' + (row.__hidden ? 'opacity:0.5;' : '') + '">';
         html += '<td class="pe-drag-handle" style="padding:4px 3px;text-align:center;color:#b0bec5;cursor:grab;font-size:14px;user-select:none;" title="Drag to reorder">\u2630</td>';
+        html += '<td class="pe-vis-cell" style="padding:4px 0;text-align:center;"><input type="checkbox" class="pe-vis-cb" data-idx="' + i + '"' + (row.__hidden ? '' : ' checked') + ' title="Show / hide this element in the viewer (Shift+click: all rows from the last clicked one; with several rows selected: all selected rows)" style="margin:0;cursor:pointer;accent-color:#0696d7;"></td>';
+        const elName = row.__elementName;
+        html += '<td class="pe-elname-cell" data-idx="' + i + '" style="padding:6px 7px;color:' + (elName === undefined ? '#b0bec5' : '#3c3c3c') + ';overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;" title="' + _peEscapeHtml(elName || '') + '">'
+             + (elName === undefined ? '\u2026' : _peEscapeHtml(elName || '\u2014'))
+             + '</td>';
         html += '<td style="padding:6px 7px;color:#3c3c3c;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;" title="' + _peEscapeHtml(row.paramName) + '">'
              + _peEscapeHtml(row.paramName)
              + '</td>';
@@ -837,6 +853,218 @@ function _peRenderParamTable(panel, rows) {
     panel.innerHTML = html;
     _peBindTableEvents();
     _peBindResizeHandles();
+    _peFillElementNames().catch(function() {});
+}
+
+// ── Row visibility ───────────────────────────────────────────────────────────
+// Each Parameter Edit row has a checkbox (checked = visible) that hides/shows its elements in
+// the viewer, so Reorder / Bulk Assign clicks can reach elements behind others. The state lives
+// on the rows (row.__hidden). Isolation and showAll() re-show everything, so hidden rows are
+// re-hidden after those events; the viewer's own "Show All" button clears the flags instead.
+
+// Viewer objects for a row, via the same revitId → dbId cache the row highlighting uses.
+function _peRowViewerEntries(row) {
+    const cache = window._peRevitDbIdCache;
+    if (!cache || !row || !row.revitIds) return [];
+    const egId = row.fileContext && row.fileContext.egId;
+    const out = [];
+    row.revitIds.forEach(function(rid) {
+        let entry = egId ? cache.get(egId + '::' + rid) : null;
+        if (!entry) entry = cache.get(String(rid));
+        if (!entry) return;
+        out.push(typeof entry === 'object' && entry.dbId !== undefined ? entry : { dbId: entry, model: viewer.model });
+    });
+    return out;
+}
+
+// Switch viewer objects completely off / back on. setNodeOff removes them from the scene in both
+// the solid and the ghosted view (viewer.hide() would leave translucent ghosts).
+function _peSetElementsOff(model, dbIds, off) {
+    const vm = (model && model.visibilityManager) || null;
+    const multi = viewer.impl && viewer.impl.visibilityManager;
+    if (vm && typeof vm.setNodeOff === 'function') {
+        dbIds.forEach(function(id) { vm.setNodeOff(id, off); });
+    } else if (multi && typeof multi.setNodeOff === 'function') {
+        dbIds.forEach(function(id) { multi.setNodeOff(id, off, model); });
+    } else {
+        off ? viewer.hide(dbIds, model) : viewer.show(dbIds, model);
+    }
+    if (viewer.impl && typeof viewer.impl.invalidate === 'function') viewer.impl.invalidate(true, true, true);
+}
+
+// ── Linked-model duplicates ──────────────────────────────────────────────────
+// Revit files often link each other (e.g. facade.rvt links structure.rvt and mep.rvt), so with
+// several files loaded the same element is drawn once per file. A link instance whose elements
+// mostly exist as native elements of another loaded model is a copy of that model: it's switched
+// off, so every element appears once and unticking a row really removes it from view. Links to
+// files that aren't loaded don't match anything and stay visible.
+const PE_LINK_COPY_MIN_MATCH = 0.6;
+
+function _peModelLabel(model) {
+    const egId = window._viewerEgIdByModel && window._viewerEgIdByModel.get(model);
+    const row = egId && (window._pendingParamEditRows || []).find(function(r) { return r.fileContext && r.fileContext.egId === egId; });
+    return (row && row.fileContext.fileName) || ('model ' + (model && model.id));
+}
+
+function _peFindLinkedDuplicates(linkScan) {
+    const dups = [];
+    linkScan.forEach(function(host) {
+        host.links.forEach(function(link, linkId) {
+            let best = null, bestMatches = 0;
+            linkScan.forEach(function(other) {
+                if (other === host) return;
+                const matches = link.rids.filter(function(rid) { return other.native.has(rid); }).length;
+                if (matches > bestMatches) { bestMatches = matches; best = other; }
+            });
+            if (best && bestMatches >= PE_LINK_COPY_MIN_MATCH * link.rids.length) {
+                dups.push({ model: host.model, linkId: linkId, dbIds: link.dbIds, source: best.model });
+                console.log('[VIS] ' + _peModelLabel(host.model) + ': link ' + linkId + ' is a copy of ' + _peModelLabel(best.model) +
+                    ' (' + bestMatches + '/' + link.rids.length + ' elements) — hidden');
+            }
+        });
+    });
+    return dups;
+}
+
+// Switch the duplicate link content off, one batched call per model (setNodeOff accepts the
+// nodes and fragments directly, so the scene is updated once instead of per element).
+function _peHideLinkedDuplicates() {
+    const dups = window._peLinkedDuplicates || [];
+    if (!viewer || !dups.length) return;
+    const byModel = new Map();
+    dups.forEach(function(d) {
+        if (!byModel.has(d.model)) byModel.set(d.model, []);
+        byModel.get(d.model).push.apply(byModel.get(d.model), d.dbIds);
+    });
+    byModel.forEach(function(dbIds, model) {
+        const vm = model.visibilityManager;
+        const tree = model.getInstanceTree && model.getInstanceTree();
+        if (!vm || typeof vm.setNodeOff !== 'function' || !tree) { _peSetElementsOff(model, dbIds, true); return; }
+        const frags = [];
+        dbIds.forEach(function(dbId) { tree.enumNodeFragments(dbId, function(f) { frags.push(f); }, true); });
+        try { vm.setNodeOff(dbIds[0], true, dbIds, frags); } catch (err) { console.warn('Linked duplicates:', err.message); }
+    });
+    if (viewer.impl && typeof viewer.impl.invalidate === 'function') viewer.impl.invalidate(true, true, true);
+}
+
+// Turn the viewer objects of the given rows off (or on), one batch per model.
+async function _peApplyRowVisibility(rowList, hidden, quiet) {
+    if (!viewer || !rowList.length) return;
+    _peEnsureVisibilityListener();
+    try { await _peEnsureRevitDbIdCache(); }
+    catch (err) { console.warn('Row visibility: element lookup failed —', err.message); return; }
+    const byModel = new Map();
+    rowList.forEach(function(row) {
+        // Re-check the flag: it may have been toggled again while the lookup was being built.
+        if (!!row.__hidden !== hidden) return;
+        _peRowViewerEntries(row).forEach(function(e) {
+            if (!byModel.has(e.model)) byModel.set(e.model, []);
+            byModel.get(e.model).push(e.dbId);
+        });
+    });
+    let elementCount = 0;
+    byModel.forEach(function(dbIds, model) {
+        elementCount += dbIds.length;
+        try { _peSetElementsOff(model, dbIds, hidden); } catch (err) { console.warn('Row visibility:', err.message); }
+    });
+    if (!quiet) console.log('[VIS] ' + (hidden ? 'off' : 'on') + ': ' + rowList.length + ' row(s) → ' + elementCount +
+        ' element(s) in ' + byModel.size + ' model(s)');
+}
+
+function _peReapplyHiddenRows() {
+    _peHideLinkedDuplicates();
+    const hiddenRows = (window._pendingParamEditRows || []).filter(function(r) { return r && r.__hidden; });
+    if (hiddenRows.length) _peApplyRowVisibility(hiddenRows, true, true); // re-apply: no log line
+}
+
+// Isolation (row highlighting, Reorder/Bulk Assign colouring) and showAll() make every element
+// visible again — re-hide the unchecked rows right after.
+function _peEnsureVisibilityListener() {
+    if (!viewer || viewer.__peVisibilityListener) return;
+    const reapply = function() { setTimeout(_peReapplyHiddenRows, 0); };
+    // With several models loaded, viewer.isolate() fires AGGREGATE_ISOLATION_CHANGED_EVENT (not
+    // ISOLATE_EVENT), and isolation resets visibility — so listen to all three.
+    [Autodesk.Viewing.ISOLATE_EVENT, Autodesk.Viewing.AGGREGATE_ISOLATION_CHANGED_EVENT, Autodesk.Viewing.SHOW_ALL_EVENT].forEach(function(evt) {
+        if (evt) viewer.addEventListener(evt, reapply);
+    });
+    // A model finished loading its object tree: element names and hidden rows can now resolve.
+    let treeTimer = null;
+    if (Autodesk.Viewing.OBJECT_TREE_CREATED_EVENT) {
+        viewer.addEventListener(Autodesk.Viewing.OBJECT_TREE_CREATED_EVENT, function() {
+            clearTimeout(treeTimer);
+            treeTimer = setTimeout(function() {
+                _peFillElementNames();
+                _peReapplyHiddenRows();
+            }, 300);
+        });
+    }
+    viewer.__peVisibilityListener = true;
+}
+
+// ── Element column ───────────────────────────────────────────────────────────
+// The viewer object's name without the trailing "[ElementId]", e.g. "Rectangular Duct [1664937]"
+// → "Rectangular Duct". Rows covering several differently named elements show "Name (+n)".
+function _peElementDisplayName(row) {
+    const names = [];
+    _peRowViewerEntries(row).forEach(function(e) {
+        const tree = e.model && e.model.getInstanceTree && e.model.getInstanceTree();
+        const raw = tree ? tree.getNodeName(e.dbId) : '';
+        const name = String(raw || '').replace(/\s*\[\d+\]\s*$/, '').trim();
+        if (name && names.indexOf(name) < 0) names.push(name);
+    });
+    if (!names.length) return '';
+    return names.length === 1 ? names[0] : names[0] + ' (+' + (names.length - 1) + ')';
+}
+
+async function _peFillElementNames() {
+    if (!viewer) return;
+    const models = _peViewerModels();
+    if (!models.some(function(m) { return m && m.getInstanceTree && m.getInstanceTree(); })) return; // not loaded yet
+    try { await _peEnsureRevitDbIdCache(models); }
+    catch (err) { console.warn('Element names: lookup failed —', err.message); return; }
+    const rows = window._pendingParamEditRows || [];
+    rows.forEach(function(r) { if (r) r.__elementName = _peElementDisplayName(r); });
+    document.querySelectorAll('#peParamTbody td.pe-elname-cell').forEach(function(td) {
+        const row = rows[parseInt(td.dataset.idx, 10)];
+        if (!row) return;
+        td.textContent = row.__elementName || '\u2014';
+        td.title = row.__elementName || '';
+    });
+}
+
+function _peSetRowsHidden(indices, hidden) {
+    const rows = window._pendingParamEditRows || [];
+    const changed = [];
+    indices.forEach(function(i) {
+        const row = rows[i];
+        if (!row || !!row.__hidden === hidden) return;
+        row.__hidden = hidden;
+        changed.push(row);
+    });
+    _peRefreshVisibilityControls();
+    _peApplyRowVisibility(changed, hidden);
+}
+
+// Sync checkboxes (rows, file headers, table header) and row dimming with row.__hidden.
+function _peRefreshVisibilityControls() {
+    const rows = window._pendingParamEditRows || [];
+    const setBox = function(cb, list) {
+        if (!cb) return;
+        const hiddenCount = list.filter(function(r) { return r.__hidden; }).length;
+        cb.checked = hiddenCount === 0;
+        cb.indeterminate = hiddenCount > 0 && hiddenCount < list.length;
+    };
+    document.querySelectorAll('#peParamTbody tr.pe-param-row').forEach(function(tr) {
+        const row = rows[parseInt(tr.dataset.idx, 10)];
+        if (!row) return;
+        const cb = tr.querySelector('.pe-vis-cb');
+        if (cb) cb.checked = !row.__hidden;
+        tr.style.opacity = row.__hidden ? '0.5' : '';
+    });
+    document.querySelectorAll('#peParamTbody tr.pe-file-separator').forEach(function(tr) {
+        setBox(tr.querySelector('.pe-vis-cb'), rows.filter(function(r) { return (r.fileContext?.fileName || '') === tr.dataset.file; }));
+    });
+    setBox(document.getElementById('peVisAll'), rows);
 }
 
 function _peBindTableEvents() {
@@ -844,8 +1072,49 @@ function _peBindTableEvents() {
     if (!tbody) return;
     const st = window._peTableState;
 
+    // ── Visibility checkboxes (row, file header, table header) ───────────────
+    // File header checkbox → all rows of that file.
+    tbody.addEventListener('change', function(e) {
+        const cb = e.target.closest('.pe-vis-cb');
+        if (!cb || cb.dataset.file === undefined) return;
+        const indices = [];
+        (window._pendingParamEditRows || []).forEach(function(r, i) { if ((r.fileContext?.fileName || '') === cb.dataset.file) indices.push(i); });
+        _peSetRowsHidden(indices, !cb.checked);
+    });
+    // Row checkbox (handled on click, which carries shiftKey; the box is already toggled then):
+    // - Shift+click → every row between the last clicked checkbox and this one, in display order;
+    // - clicking a checkbox of one of several selected rows → all selected rows;
+    // - otherwise just this row.
+    tbody.addEventListener('click', function(e) {
+        const cb = e.target.closest('.pe-vis-cb');
+        if (!cb || cb.dataset.idx === undefined) return;
+        const idx = parseInt(cb.dataset.idx, 10);
+        const hidden = !cb.checked;
+        let indices = [idx];
+        const order = Array.from(tbody.querySelectorAll('tr.pe-param-row')).map(function(tr) { return parseInt(tr.dataset.idx, 10); });
+        const from = order.indexOf(st.lastVisClick);
+        if (e.shiftKey && from >= 0) {
+            const to = order.indexOf(idx);
+            indices = order.slice(Math.min(from, to), Math.max(from, to) + 1);
+        } else if (st.selected.has(idx) && st.selected.size > 1) {
+            indices = Array.from(st.selected);
+        }
+        st.lastVisClick = idx;
+        _peSetRowsHidden(indices, hidden);
+    });
+    const visAll = document.getElementById('peVisAll');
+    if (visAll) visAll.addEventListener('change', function() {
+        _peSetRowsHidden((window._pendingParamEditRows || []).map(function(_, i) { return i; }), !visAll.checked);
+    });
+    _peRefreshVisibilityControls();
+    _peEnsureVisibilityListener();
+
     // ── Unified mousedown (row selection + cell selection) ───────────────────
     tbody.addEventListener('mousedown', function(e) {
+        if (e.target.closest('.pe-vis-cell')) {  // visibility checkbox: no row/cell selection
+            if (e.shiftKey) e.preventDefault();  // Shift+click range: don't select text
+            return;
+        }
         const td = e.target.closest('td.pe-new-cell');
         const tr = e.target.closest('tr.pe-param-row');
         if (!tr) return;
@@ -1033,9 +1302,9 @@ function _peBindResizeHandles() {
     if (!table) return;
     const cols = table.querySelectorAll('col');
     const handles = table.querySelectorAll('thead .pe-col-resize');
-    // handles[0] → col 1 (Parameter), handles[1] → col 2 (Current), handles[2] → col 3 (New Value)
+    // handles[0] → Element, handles[1] → Parameter, handles[2] → Current, handles[3] → New Value
     handles.forEach(function(handle, i) {
-        const colIdx = i + 1; // skip col 0 (drag-handle column)
+        const colIdx = i + 2; // skip the drag-handle and visibility columns
         handle.addEventListener('mousedown', function(e) {
             e.preventDefault();
             e.stopPropagation();
@@ -1369,17 +1638,26 @@ async function _peBuildViewerRevitIds() {
 // for each model we count how many of its Revit Element IDs appear in the
 // pending rows for each egId — the egId with the most matches wins.
 // This avoids relying on JavaScript object identity or model load order.
-async function _peIsolateWithFocus(allPairs, focusPairs, focusColor, options) {
-    // Mark the start of this run in debug.log (rather than clearing it, which would also
-    // erase earlier [PERF] summaries).
-    console.log('──────── PE focus run ────────');
+// Visible models in the viewer (same fallbacks as the rest of the Parameter Edit code).
+function _peViewerModels() {
+    return (viewer.getVisibleModels ? viewer.getVisibleModels() : null)
+        || (viewer.impl && viewer.impl.modelQueue ? viewer.impl.modelQueue().getModels() : null)
+        || [viewer.model];
+}
 
-    const allModels = (viewer.getVisibleModels ? viewer.getVisibleModels() : null)
-                   || (viewer.impl && viewer.impl.modelQueue ? viewer.impl.modelQueue().getModels() : null)
-                   || [viewer.model];
-
+// Builds window._peRevitDbIdCache (revitId → { dbId, model }, plus "egId::revitId" keys for
+// multi-model sessions) unless it already covers every loaded model. Shared by row highlighting,
+// the visibility checkboxes and the Element column; concurrent callers share one scan.
+let _peCacheBuildPromise = null;
+async function _peEnsureRevitDbIdCache(allModels) {
+    allModels = allModels || _peViewerModels();
+    const loadedCount = allModels.filter(function(m) { return m && m.getInstanceTree && m.getInstanceTree(); }).length;
     const cachedModelCount = (window._peRevitDbIdCache && window._peRevitDbIdCache._modelCount) || 0;
-    if (!window._peRevitDbIdCache || window._peRevitDbIdCache.size === 0 || cachedModelCount < allModels.length) {
+    if (window._peRevitDbIdCache && window._peRevitDbIdCache.size > 0 && cachedModelCount >= loadedCount) {
+        return window._peRevitDbIdCache;
+    }
+    if (_peCacheBuildPromise) return _peCacheBuildPromise;
+    _peCacheBuildPromise = (async function() {
 
         // Build revitId → Set<egId> index from all pending rows so we can vote
         var ridToEgIds = new Map();
@@ -1394,11 +1672,14 @@ async function _peIsolateWithFocus(allPairs, focusPairs, focusColor, options) {
         });
 
         var cache = new Map();
+        var scannedModels = 0;
+        var linkScan = []; // per model: { model, native: Set<revitId>, links: Map<linkId, { rids, dbIds }> }
 
         await Promise.all(allModels.map(function(modelRef) {
             return new Promise(function(resolve, reject) {
                 var instanceTree = modelRef.getInstanceTree();
                 if (!instanceTree) { resolve(); return; }
+                scannedModels++;
                 var dbIdsToScan = [];
                 instanceTree.enumNodeChildren(instanceTree.getRootId(), function(dbId) { dbIdsToScan.push(dbId); }, true);
                 modelRef.getBulkProperties(dbIdsToScan, {}, function(results) {
@@ -1430,15 +1711,56 @@ async function _peIsolateWithFocus(allPairs, focusPairs, focusColor, options) {
                         if (bestEgId) cache.set(bestEgId + '::' + rid, entry);
                         cache.set(rid, entry); // plain fallback (last model wins for single-model)
                     });
+
+                    // Linked-model content has ElementIds like "1664627/425506" (link instance /
+                    // element in the linked file); everything else is the model's own content.
+                    var native = new Set(), links = new Map();
+                    modelRids.forEach(function(dbId, rid) {
+                        var slash = rid.indexOf('/');
+                        if (slash < 0) { native.add(rid); return; }
+                        var linkId = rid.slice(0, slash);
+                        if (!links.has(linkId)) links.set(linkId, { rids: [], dbIds: [] });
+                        links.get(linkId).rids.push(rid.slice(slash + 1));
+                        links.get(linkId).dbIds.push(dbId);
+                    });
+                    linkScan.push({ model: modelRef, native: native, links: links });
                     resolve();
                 }, reject);
             });
         }));
 
-        cache._modelCount = allModels.length;
+        cache._modelCount = scannedModels;
         window._peRevitDbIdCache = cache;
-        console.log('PE focus: cache built — ' + cache.size + ' entries across ' + allModels.length + ' model(s)');
-    }
+        window._peLinkedDuplicates = _peFindLinkedDuplicates(linkScan);
+        console.log('PE focus: cache built — ' + cache.size + ' entries across ' + scannedModels + ' model(s)');
+        return cache;
+    })();
+    try {
+        const built = await _peCacheBuildPromise;
+        // The Element column and unticked rows depend on this lookup — refresh them now.
+        setTimeout(function() { _peHideLinkedDuplicates(); _peFillElementNames(); _peReapplyHiddenRows(); }, 0);
+        return built;
+    } finally { _peCacheBuildPromise = null; }
+}
+
+// Called once the viewer has models: the table may have been rendered before the viewer existed,
+// so attach the listeners and fill the Element column now.
+function _peOnViewerModelsReady() {
+    if (!viewer || !(window._pendingParamEditRows || []).length) return;
+    _peEnsureVisibilityListener();
+    _peFillElementNames().catch(function() {});
+}
+
+async function _peIsolateWithFocus(allPairs, focusPairs, focusColor, options) {
+    // Mark the start of this run in debug.log (rather than clearing it, which would also
+    // erase earlier [PERF] summaries).
+    console.log('──────── PE focus run ────────');
+
+    const allModels = (viewer.getVisibleModels ? viewer.getVisibleModels() : null)
+                   || (viewer.impl && viewer.impl.modelQueue ? viewer.impl.modelQueue().getModels() : null)
+                   || [viewer.model];
+
+    await _peEnsureRevitDbIdCache(allModels);
 
     var cache = window._peRevitDbIdCache;
 

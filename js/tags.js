@@ -52,8 +52,9 @@
     }
 
     function rowsWithValues() {
+        // Rows unticked in the Parameter Edit visibility column (row.__hidden) get no tag.
         return (window._pendingParamEditRows || []).filter(function (r) {
-            return r && r.revitIds && r.revitIds.length && String(r.newValue || '').trim() !== '';
+            return r && !r.__hidden && r.revitIds && r.revitIds.length && String(r.newValue || '').trim() !== '';
         });
     }
 
