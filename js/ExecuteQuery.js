@@ -753,6 +753,8 @@ function createTreemapVisualization(fileSummary, category) {
         example1State._queryBarShown = true;
         const actionBar = document.getElementById('queryActionBar');
         if (actionBar) actionBar.style.display = 'flex';
+        const execBtn = document.getElementById('executeQueryBtn');
+        if (execBtn) execBtn.style.display = 'none';
     }
     const container = document.getElementById('example1Treemap');
     container.innerHTML = '';
@@ -1216,6 +1218,7 @@ function _resetToNewQuery() {
     const execBtn = document.getElementById('executeQueryBtn');
     const actionBar = document.getElementById('queryActionBar');
     if (actionBar) actionBar.style.display = 'none';
+    if (execBtn) execBtn.style.display = '';
     selectedEgIds.clear();
     selectMode = false;
     example1State._queryBarShown = false;
@@ -1224,7 +1227,17 @@ function _resetToNewQuery() {
     if (sb) { sb.style.display = 'none'; }
     document.getElementById('example1Stats').textContent = '';
     document.getElementById('loadMoreBtn').style.display = 'none';
+    updateViewerButton();
 }
+
+// Picking a different hub after a query brings Execute Query back (the action bar only applies
+// to the treemap that is currently shown).
+document.addEventListener('DOMContentLoaded', function () {
+    const hubSelect = document.getElementById('hubSelect');
+    if (hubSelect) hubSelect.addEventListener('change', function () {
+        if (example1State && example1State._queryBarShown) _resetToNewQuery();
+    });
+});
 
 function toggleSelectMode() {
     selectMode = !selectMode;
