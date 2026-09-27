@@ -245,7 +245,7 @@ function renderZoomView(selectedParam) {
     const bar = document.createElement('div');
     bar.className = 'zoom-bar';
     bar.innerHTML = `
-        <button class="btn-zoom-back" onclick="exitZoom()">â† Overview</button>
+        <button class="btn-zoom-back" onclick="exitZoom()">← All files</button>
         <span class="zoom-breadcrumb">${zoomState.projectName} &rsaquo; <strong>${(zoomState.egName || '(unnamed)').replace(/\.rvt$/i, '')}</strong></span>
         <label class="zoom-label">Group by parameter:</label>
         <select class="zoom-param-select" onchange="renderZoomView(this.value)">
@@ -261,7 +261,7 @@ function renderZoomView(selectedParam) {
     // â”€â”€ Search bar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const zoomSearchBar = document.createElement('div');
     zoomSearchBar.style.cssText = 'margin-bottom:8px;';
-    zoomSearchBar.innerHTML = `<input id="zoomSearchInput" type="text" placeholder="ðŸ” Filter by value\u2026"
+    zoomSearchBar.innerHTML = `<input id="zoomSearchInput" type="text" placeholder="Filter by value"
         oninput="filterZoomTreemap(this.value)"
         style="width:100%;box-sizing:border-box;padding:7px 12px;border:1px solid #d0d0d0;border-radius:6px;font-size:13px;outline:none;" />`;
     container.appendChild(zoomSearchBar);
@@ -666,6 +666,8 @@ async function openParameterExplorer() {
     const backBtn     = document.getElementById('paramExplorerBackBtn');
 
     modal.style.display = 'flex';
+    setFlowStep(3);
+    _peShowPickerActions(false);
     loading.style.display = 'flex';
     treemapDiv.innerHTML  = '';
     paramExplorerZoomState = null;
@@ -831,21 +833,17 @@ function _peRenderChecklist(paramFileMap, selectedFiles, container) {
             </div>
             <div id="pePickerRight">
                 <div id="pePickerRightHeader">
-                    <span id="pePickerSelCount" style="font-weight:600;color:#0696d7;">0 selected</span>
-                    <button onclick="_pePicker_ClearAll()">âœ• Clear</button>
+                    <span>Selected parameters</span>
+                    <button onclick="_pePicker_ClearAll()">Clear</button>
                 </div>
                 <div id="pePickerSelectedList">
                     <div id="pePickerEmptyHint">Click parameter tiles<br>to add them here</div>
                 </div>
-                <div id="pePickerRightFooter">
-                    <button id="pePickerLoadBtn" class="btn btn-execute" disabled
-                        onclick="_peLoadCheckedValues()">
-                        Load Values &#8594;
-                    </button>
-                </div>
             </div>
         </div>`;
 
+    _peShowPickerActions(true);
+    _pePicker_UpdatePanel();
     _pePicker_DrawTypeOverview();
 
     // Resize observer \u2013 redraw SVG when container changes size
@@ -1016,23 +1014,31 @@ function _pePicker_SelectAllInType() {
     _pePicker_UpdatePanel();
 }
 
+// "N selected · Load values" sits in the explorer's action row, and only while picking parameters.
+function _peShowPickerActions(show) {
+    ['pePickerSelCount', 'pePickerLoadBtn'].forEach(function (id) {
+        const el = document.getElementById(id);
+        if (el) el.style.display = show ? '' : 'none';
+    });
+}
+
 function _pePicker_UpdatePanel() {
     const sel = window._pePickerSelected || new Set();
     const n   = sel.size;
     const countEl = document.getElementById('pePickerSelCount');
-    if (countEl) countEl.textContent = `${n} selected`;
+    if (countEl) countEl.textContent = `${n} parameter${n !== 1 ? 's' : ''} selected`;
     const loadBtn = document.getElementById('pePickerLoadBtn');
     if (loadBtn) loadBtn.disabled = (n === 0);
     const listEl = document.getElementById('pePickerSelectedList');
     if (!listEl) return;
     if (n === 0) {
-        listEl.innerHTML = '<div id="pePickerEmptyHint">Click parameter tiles<br>to add them here</div>';
+        listEl.innerHTML = '<div id="pePickerEmptyHint">Click parameter tiles<br>to add them here.</div>';
         return;
     }
     listEl.innerHTML = Array.from(sel).map(name =>
         `<div class="pe-picker-chip">
             <span title="${_peEsc(name)}">${_peEsc(name)}</span>
-            <button onclick="_pePicker_RemoveParam(${JSON.stringify(name)})" title="Remove">âœ•</button>
+            <button onclick="_pePicker_RemoveParam(${JSON.stringify(name)})" title="Remove" aria-label="Remove ${_peEsc(name)}">\u2715</button>
         </div>`
     ).join('');
 }

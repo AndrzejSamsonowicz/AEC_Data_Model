@@ -65,3 +65,23 @@ function openSelectedInViewer() {
     if (selected.length === 0) return;
     openViewerModal(selected);
 }
+
+// Step rail under the header (Query hub → Pick files → Pick parameters → Edit in viewer).
+// Steps before `step` are marked done, `step` is the current one.
+function setFlowStep(step) {
+    document.querySelectorAll('#flowSteps .flow-step').forEach(function (li) {
+        const n = Number(li.dataset.step);
+        li.classList.toggle('done', n < step);
+        li.classList.toggle('current', n === step);
+        if (n === step) li.setAttribute('aria-current', 'step');
+        else li.removeAttribute('aria-current');
+    });
+}
+
+// Closing the viewer returns to whichever main-page step is still open underneath it.
+function flowStepBehindViewer() {
+    const explorer = document.getElementById('paramExplorerModal');
+    return (explorer && explorer.style.display !== 'none') ? 3 : 2;
+}
+
+document.addEventListener('DOMContentLoaded', function () { setFlowStep(1); });

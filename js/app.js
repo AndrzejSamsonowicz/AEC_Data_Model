@@ -5,13 +5,6 @@ loadSettings();
 
 const HUB_REGIONS = ['US', 'EMEA', 'APAC', 'AUS', 'CAN', 'GBR', 'DEU', 'IND', 'JPN'];
 
-function cloneSelectOptions(sourceSelect, targetSelect) {
-    targetSelect.innerHTML = '';
-    Array.from(sourceSelect.children).forEach((child) => {
-        targetSelect.appendChild(child.cloneNode(true));
-    });
-}
-
 // Load hubs when authenticated
 async function loadHubs() {
     const hubSelect = document.getElementById('hubSelect');
@@ -97,7 +90,7 @@ async function loadHubs() {
         const fragment = document.createDocumentFragment();
         const defaultOption = document.createElement('option');
         defaultOption.value = '';
-        defaultOption.textContent = 'Select ACC Hub...';
+        defaultOption.textContent = 'Choose a hub';
         fragment.appendChild(defaultOption);
 
         let currentRegion = null;
@@ -105,7 +98,7 @@ async function loadHubs() {
         hubs.forEach(hub => {
             if (currentRegion !== hub.region) {
                 currentGroup = document.createElement('optgroup');
-                currentGroup.label = `━━━ ${hub.region} Region ━━━`;
+                currentGroup.label = `${hub.region} region`;
                 fragment.appendChild(currentGroup);
                 currentRegion = hub.region;
             }
@@ -118,12 +111,6 @@ async function loadHubs() {
         });
         hubSelect.innerHTML = '';
         hubSelect.appendChild(fragment);
-
-        // Sync Example 2 and 5 hub selectors with the same options
-        const hub2Select = document.getElementById('hub2Select');
-        if (hub2Select) cloneSelectOptions(hubSelect, hub2Select);
-        const hub5Select = document.getElementById('hub5Select');
-        if (hub5Select) cloneSelectOptions(hubSelect, hub5Select);
         
         logDebug(`Loaded ${hubs.length} ACC hubs`);
         

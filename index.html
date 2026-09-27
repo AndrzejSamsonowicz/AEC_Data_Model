@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AEC Data Model - Advanced Query Demonstration - (c) Andrzej Samsonowicz, Autodesk</title>
+    <title>AEC Data Model - Advanced Queries - (c) Andrzej Samsonowicz, Autodesk</title>
     
     <!-- Autodesk Viewer SDK -->
     <link rel="stylesheet" href="https://developer.api.autodesk.com/modelderivative/v2/viewers/7.*/style.css">
@@ -16,22 +16,38 @@
     <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
-    <div class="header">
+    <header class="header">
         <div class="header-left">
-            <h1 class="header-title">AEC Data Model - Advanced Queries</h1>
-            <div style="font-size: 12px; opacity: 0.9; margin-top: 4px;">Multi-Region ACC Hub Support</div>
+            <h1 class="header-title">AEC Data Model</h1>
+            <label class="header-hub" title="The query searches every project in this hub">
+                <span class="sr-only">Hub</span>
+                <select id="hubSelect" class="form-select header-select">
+                    <option value="">Log in to choose a hub</option>
+                </select>
+            </label>
         </div>
         <div class="header-right">
-            <button class="btn btn-primary" onclick="openSettingsModal()">Settings</button>
+            <button class="btn btn-primary btn-icon-only" onclick="openSettingsModal()" title="Settings" aria-label="Settings">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+            </button>
             <button class="btn btn-primary" id="loginBtn" onclick="loginWithAutodesk()">Login With Autodesk</button>
             <button class="btn btn-primary" id="logoutBtn" style="display:none" onclick="logout()">Log Out</button>
         </div>
-    </div>
+    </header>
+
+    <!-- Where the user is in the flow; driven by setFlowStep() in js/ui.js -->
+    <nav class="flow-bar" aria-label="Progress">
+        <ol class="flow-steps" id="flowSteps">
+            <li class="flow-step" data-step="1"><span class="flow-dot">1</span>Query hub</li>
+            <li class="flow-step" data-step="2"><span class="flow-dot">2</span>Pick files</li>
+            <li class="flow-step" data-step="3"><span class="flow-dot">3</span>Pick parameters</li>
+            <li class="flow-step" data-step="4"><span class="flow-dot">4</span>Edit in viewer</li>
+        </ol>
+        <div class="results-stats" id="example1Stats" aria-live="polite"></div>
+    </nav>
 
     <div class="main-layout">
-        <!-- Content Area -->
         <div class="content-area" id="mainContainer">
-            <!-- Example 1: Cross-Portfolio Element Search -->
             <div id="example1" class="example-content active">
                 <!-- hidden project select (kept for JS compatibility) -->
                 <div style="display:none;">
@@ -41,49 +57,42 @@
                 </div>
 
                 <div class="results-panel">
-                    <div class="results-header">
-                        <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0;flex-wrap:wrap;">
-                            <select id="hubSelect" class="form-select" style="flex:1;min-width:120px;max-width:280px;">
-                                <option value="">Select Hub...</option>
-                            </select>
-                            <button id="executeQueryBtn" class="btn btn-execute" onclick="executeExample1()" style="flex-shrink:0;">
-                                <span class="btn-icon">▶</span> Execute Query
-                            </button>
-                            <button id="loadMoreBtn" class="btn btn-execute" onclick="loadMoreExample1()" style="display:none;background:#666;flex-shrink:0;">
-                                <span class="btn-icon">+</span> Load More
-                            </button>
-                            <!-- Action bar: appears after query completes, replaces Execute Query -->
-                            <div id="queryActionBar" style="display:none;align-items:center;gap:8px;">
-                                <button class="btn-viewer-open" onclick="openParameterExplorer()">
-                                    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="flex-shrink:0"><rect x="0" y="8" width="4" height="8" rx="1"/><rect x="6" y="4" width="4" height="12" rx="1"/><rect x="12" y="1" width="4" height="15" rx="1"/></svg>
-                                    Explore Parameters
-                                </button>
-                                <button class="btn-viewer-open" onclick="showSelectionInViewer()">
-                                    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="flex-shrink:0"><path d="M8 3C4.5 3 1.5 5.5 0 8c1.5 2.5 4.5 5 8 5s6.5-2.5 8-5c-1.5-2.5-4.5-5-8-5zm0 8a3 3 0 1 1 0-6 3 3 0 0 1 0 6zm0-5a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg>
-                                    Show in Viewer
-                                </button>
-                                <span id="treemapSelectionCount" style="white-space:nowrap;font-size:13px;color:#6a6a6a;">0 files selected</span>
-                            </div>
+                    <div class="results-header action-row">
+                        <button id="executeQueryBtn" class="btn btn-execute" onclick="executeExample1()">
+                            <span class="btn-icon">&#9654;</span> Run query
+                        </button>
+                        <button id="loadMoreBtn" class="btn btn-secondary" onclick="loadMoreExample1()" style="display:none;">
+                            Load more
+                        </button>
+
+                        <div id="treemapSearchBar" class="action-search" style="display:none;">
+                            <input id="treemapSearchInput" type="search" placeholder="Filter files by name"
+                                aria-label="Filter files by name"
+                                title="Click a project header to zoom into it. Click a file to select it for parameter analysis."
+                                oninput="filterTreemap(this.value)" />
                         </div>
-                        <div class="results-stats" id="example1Stats" style="margin-left:12px;white-space:nowrap;"></div>
+
+                        <!-- Appears after the query completes, replaces Run query -->
+                        <div id="queryActionBar" class="action-buttons" style="display:none;">
+                            <span id="treemapSelectionCount" class="action-count">0 files selected</span>
+                            <button class="btn btn-secondary" onclick="showSelectionInViewer()">
+                                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 3C4.5 3 1.5 5.5 0 8c1.5 2.5 4.5 5 8 5s6.5-2.5 8-5c-1.5-2.5-4.5-5-8-5zm0 8a3 3 0 1 1 0-6 3 3 0 0 1 0 6zm0-5a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg>
+                                Show in viewer
+                            </button>
+                            <button class="btn btn-execute" onclick="openParameterExplorer()">
+                                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="0" y="8" width="4" height="8" rx="1"/><rect x="6" y="4" width="4" height="12" rx="1"/><rect x="12" y="1" width="4" height="15" rx="1"/></svg>
+                                Explore parameters
+                            </button>
+                        </div>
                     </div>
 
                     <div id="zoomSelectionBar" style="display:none;">
                         <button class="btn-viewer-open" onclick="showZoomSelectionInViewer()">
-                            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="flex-shrink:0"><path d="M8 3C4.5 3 1.5 5.5 0 8c1.5 2.5 4.5 5 8 5s6.5-2.5 8-5c-1.5-2.5-4.5-5-8-5zm0 8a3 3 0 1 1 0-6 3 3 0 0 1 0 6zm0-5a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg>
-                            Show in Viewer
+                            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="flex-shrink:0" aria-hidden="true"><path d="M8 3C4.5 3 1.5 5.5 0 8c1.5 2.5 4.5 5 8 5s6.5-2.5 8-5c-1.5-2.5-4.5-5-8-5zm0 8a3 3 0 1 1 0-6 3 3 0 0 1 0 6zm0-5a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg>
+                            Show in viewer
                         </button>
                         <button class="btn-clear-selection" onclick="clearZoomSelection()">&#x2715; Clear</button>
                         <span id="zoomSelectionCount">0 elements selected</span>
-                    </div>
-                    
-                    <div id="treemapSearchBar" style="display:none;margin-bottom:8px;">
-                        <input id="treemapSearchInput" type="text" placeholder="Filter files by name…"
-                            oninput="filterTreemap(this.value)"
-                            style="width:100%;box-sizing:border-box;padding:7px 12px;border:1px solid #d0d0d0;border-radius:6px;font-size:13px;outline:none;" />
-                        <div style="margin-top:5px;font-size:11px;color:#888;padding-left:2px;">
-                            Click a project header to zoom into it &nbsp;·&nbsp; click a file to select / deselect it for parameter analysis
-                        </div>
                     </div>
 
                     <div style="position: relative;">
@@ -91,14 +100,16 @@
                             <div class="spinner"></div>
                             <div>Loading...</div>
                         </div>
-                        <div id="example1Treemap" class="treemap-container"></div>
+                        <div id="example1Treemap" class="treemap-container">
+                            <div class="treemap-empty">Choose a hub above, then run the query to map its Revit files.</div>
+                        </div>
                     </div>
 
                     <!-- Compliance Results -->
                     <div id="example1CompliancePanel" style="display:none;margin-bottom:16px;">
                         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-                            <h3 style="margin:0;font-size:15px;">🔍 Compliance Results</h3>
-                            <button onclick="document.getElementById('example1CompliancePanel').style.display='none'" style="background:none;border:none;cursor:pointer;font-size:18px;color:#666;">&times;</button>
+                            <h3 style="margin:0;font-size:15px;">Compliance results</h3>
+                            <button onclick="document.getElementById('example1CompliancePanel').style.display='none'" aria-label="Close" style="background:none;border:none;cursor:pointer;font-size:18px;color:#666;">&times;</button>
                         </div>
                         <div id="example1ComplianceResults"></div>
                         <div id="example1ComplianceTreemap" style="margin-top:12px;"></div>
@@ -106,251 +117,6 @@
 
                 </div><!-- /.results-panel -->
             </div><!-- /#example1 -->
-
-            <!-- Example 2: Material Usage Analysis -->
-            <div id="example2" class="example-content">
-                <div class="example-header">
-                    <h2>Example 2: Material Usage Analysis</h2>
-                    <p class="example-description">Instantly see which materials are used across every file in your hub — no file-opening required. Each file is scanned with a single API call that returns material counts for thousands of elements in milliseconds.</p>
-                    <div style="background: #e8f5e9; border-left: 4px solid #4CAF50; padding: 12px 16px; margin-top: 12px; border-radius: 4px; font-size: 14px;">
-                        <strong>💡 AEC Data Model Advantage:</strong> The <code>distinctPropertyValuesInElementGroupByName</code> query returns a full material breakdown per file in one call — no element iteration or file download required.
-                    </div>
-                </div>
-
-                <div class="controls-panel">
-                    <div class="control-group">
-                        <label class="control-label">Hub</label>
-                        <div style="display: flex; gap: 8px;">
-                            <select id="hub2Select" class="form-select" style="flex: 1;">
-                                <option value="">Select Hub...</option>
-                            </select>
-                            <button class="btn btn-primary" onclick="loadHubs()" title="Refresh Hubs" style="padding: 10px 16px;">↻</button>
-                        </div>
-                    </div>
-
-                    <div class="control-group">
-                        <label class="control-label">Element Category</label>
-                        <select id="category2Select" class="form-select">
-                            <option value="">Select Category...</option>
-                            <option value="Ceilings">Ceilings</option>
-                            <option value="Doors">Doors</option>
-                            <option value="Floors">Floors</option>
-                            <option value="Generic Models">Generic Models</option>
-                            <option value="Roofs">Roofs</option>
-                            <option value="Structural Columns">Structural Columns</option>
-                            <option value="Structural Framing">Structural Framing</option>
-                            <option value="Walls">Walls</option>
-                            <option value="Windows">Windows</option>
-                        </select>
-                    </div>
-
-                    <div class="control-group">
-                        <label class="control-label">Material Property</label>
-                        <select id="materialProp2Select" class="form-select">
-                            <option value="Structural Material">Structural Material</option>
-                            <option value="Material">Material</option>
-                            <option value="Type Name">Type Name</option>
-                            <option value="Family Name">Family Name</option>
-                            <option value="Phase Created">Phase Created</option>
-                        </select>
-                    </div>
-
-                    <button class="btn btn-execute" onclick="executeExample2()">
-                        <span class="btn-icon">▶</span> Analyze Materials
-                    </button>
-                </div>
-
-                <div class="results-panel">
-                    <div class="results-header">
-                        <h3>Material Distribution</h3>
-                        <div class="results-stats" id="example2Stats"></div>
-                    </div>
-
-                    <div style="position: relative;">
-                        <div id="example2Loading" class="loading-indicator" style="display: none;">
-                            <div class="spinner"></div>
-                            <div id="example2LoadingText">Scanning files...</div>
-                        </div>
-                        <div id="example2Chart" class="treemap-container"></div>
-                    </div>
-
-                    <div class="code-display">
-                        <div class="code-header">
-                            <span>GraphQL Query</span>
-                            <button class="btn-copy" onclick="copyQuery(2)">Copy</button>
-                        </div>
-                        <pre id="example2Query"><code>query GetMaterialDistribution($elementGroupId: ID!, $name: String!, $filter: ElementFilterInput) {
-  distinctPropertyValuesInElementGroupByName(
-    elementGroupId: $elementGroupId
-    name: $name
-    filter: $filter
-  ) {
-    results {
-      definition { id }
-      values(limit: 500) {
-        value
-        count
-      }
-    }
-  }
-}
-
-Variables:
-{
-  "elementGroupId": "YWVjZH5...",
-  "name": "Structural Material",
-  "filter": {
-    "query": "property.name.category==Walls"
-  }
-}
-
-✨ Key Benefit: One call per file — returns material breakdown for ALL elements in that category.
-⚡ Speed: No element iteration needed — the API aggregates counts server-side.
-📊 Run once per file, aggregate across your portfolio for instant cross-hub material analysis.</code></pre>
-                    </div>
-                </div>
-            </div>
-            <div id="example3" class="example-content">
-                <h2>Example 3: Quality Control Check</h2>
-                <p>Coming soon...</p>
-            </div>
-            <div id="example4" class="example-content">
-                <h2>Example 4: Version Comparison</h2>
-                <p>Coming soon...</p>
-            </div>
-            <!-- Example 5: Smart Folder Search -->
-            <div id="example5" class="example-content">
-                <div class="example-header">
-                    <h2>Example 5: Smart Folder Search</h2>
-                    <p class="example-description">Navigate your project folder tree and instantly search for elements across every model inside — no file-opening required. Scope your query to an exact folder or drill recursively through all subfolders.</p>
-                    <div style="background: #fce4ec; border-left: 4px solid #e91e63; padding: 12px 16px; margin-top: 12px; border-radius: 4px; font-size: 14px;">
-                        <strong>💡 AEC Data Model Advantage:</strong> <code>elementsByFolder</code> and <code>elementsByFolderAndSubFolders</code> let you scope a search to any folder path in your project — queries run server-side across all models simultaneously.
-                    </div>
-                </div>
-
-                <div class="controls-panel">
-                    <div class="control-group">
-                        <label class="control-label">Hub</label>
-                        <div style="display:flex;gap:8px;">
-                            <select id="hub5Select" class="form-select" style="flex:1;" onchange="loadExample5Projects()">
-                                <option value="">Select Hub...</option>
-                            </select>
-                            <button class="btn btn-primary" onclick="loadHubs()" title="Refresh Hubs" style="padding:10px 16px;">↻</button>
-                        </div>
-                    </div>
-
-                    <div class="control-group">
-                        <label class="control-label">Project</label>
-                        <select id="project5Select" class="form-select" disabled onchange="loadExample5TopFolders()">
-                            <option value="">Select a hub first...</option>
-                        </select>
-                    </div>
-
-                    <div class="control-group">
-                        <label class="control-label">Element Category</label>
-                        <select id="category5Select" class="form-select">
-                            <option value="">Select Category...</option>
-                            <option value="Ceilings">Ceilings</option>
-                            <option value="Doors">Doors</option>
-                            <option value="Ducts">Ducts</option>
-                            <option value="Floors">Floors</option>
-                            <option value="Furniture">Furniture</option>
-                            <option value="Generic Models">Generic Models</option>
-                            <option value="Mechanical Equipment">Mechanical Equipment</option>
-                            <option value="Pipes">Pipes</option>
-                            <option value="Structural Columns">Structural Columns</option>
-                            <option value="Structural Framing">Structural Framing</option>
-                            <option value="Walls">Walls</option>
-                            <option value="Windows">Windows</option>
-                        </select>
-                    </div>
-                </div>
-
-                <!-- Folder Browser -->
-                <div style="background:white;padding:16px 20px 20px;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,0.08);margin-bottom:24px;">
-                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-                        <label class="control-label" style="margin:0;">📂 Navigate to Folder</label>
-                        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;user-select:none;">
-                            <input type="checkbox" id="include5Subfolders" checked>
-                            Include subfolders (recursive)
-                        </label>
-                    </div>
-                    <div id="example5FolderBrowser" style="border:1px solid #e0e0e0;border-radius:6px;padding:12px;min-height:52px;background:#fafafa;">
-                        <div style="color:#999;font-size:13px;">Select a project to browse folders</div>
-                    </div>
-                    <div style="margin-top:14px;">
-                        <button class="btn btn-execute" onclick="executeExample5()">
-                            <span class="btn-icon">▶</span> Search Folder
-                        </button>
-                    </div>
-                </div>
-
-                <div class="results-panel">
-                    <div class="results-header">
-                        <h3>Elements by File</h3>
-                        <div class="results-stats" id="example5Stats"></div>
-                    </div>
-
-                    <div style="position:relative;">
-                        <div id="example5Loading" class="loading-indicator" style="display:none;">
-                            <div class="spinner"></div>
-                            <div id="example5LoadingText">Searching folder…</div>
-                        </div>
-                        <div id="example5Chart" class="treemap-container" style="min-height:300px;"></div>
-                    </div>
-
-                    <div class="code-display">
-                        <div class="code-header">
-                            <span>GraphQL Query</span>
-                            <button class="btn-copy" onclick="copyQuery(5)">Copy</button>
-                        </div>
-                        <pre id="example5Query"><code># SHALLOW mode (exact folder only):
-query SearchFolder(
-  $projectId: ID!
-  $folderId:  ID!
-  $filter:    ElementFilterInput
-  $pagination: PaginationInput
-) {
-  elementsByFolder(
-    projectId:  $projectId
-    folderId:   $folderId
-    filter:     $filter
-    pagination: $pagination
-  ) {
-    pagination { pageSize cursor }
-    results { id elementGroup { id name } }
-  }
-}
-
-# RECURSIVE mode (folder + all subfolders):
-# Step 1 — discover all files under the folder tree:
-query GetEGsInFolderTree($projectId: ID!, $folderId: ID!) {
-  elementGroupsByFolderAndSubFolders(
-    projectId: $projectId
-    folderId:  $folderId
-  ) {
-    results { id name }
-  }
-}
-# Step 2 — count elements per file (run once per EG from Step 1):
-query CountEls($elementGroupId: ID!, $filter: ElementFilterInput, $pagination: PaginationInput) {
-  elementsByElementGroup(
-    elementGroupId: $elementGroupId
-    filter:         $filter
-    pagination:     $pagination
-  ) {
-    pagination { cursor }
-    results { id }
-  }
-}
-
-✨ Shallow: elementsByFolder — groups returned elements by file.
-📂 Recursive: elementGroupsByFolderAndSubFolders discovers all files,
-   then elementsByElementGroup counts per file in parallel batches.
-🔄 Cursor pagination: up to 500 elements counted per file.</code></pre>
-                    </div>
-                </div>
-            </div>
         </div>
     </div>
 
@@ -359,21 +125,24 @@ query CountEls($elementGroupId: ID!, $filter: ElementFilterInput, $pagination: P
         <div class="viewer-modal-content">
             <div class="viewer-modal-header">
                 <div class="viewer-modal-left">
-                    <h2 id="viewerModalTitle" style="margin: 0; color: white;">Model Viewer</h2>
-                    <button id="viewerReorderBtn" onclick="viewerReorder()" style="padding:5px 14px;background:rgba(255,255,255,0.15);color:white;border:1px solid rgba(255,255,255,0.4);border-radius:4px;cursor:pointer;font-size:13px;font-weight:600;">Reorder</button>
-                    <button id="viewerBulkAssignBtn" onclick="viewerBulkAssign()" style="padding:5px 14px;background:rgba(255,255,255,0.15);color:white;border:1px solid rgba(255,255,255,0.4);border-radius:4px;cursor:pointer;font-size:13px;font-weight:600;">Bulk Assign</button>
-                    <button id="viewerTagsBtn" onclick="viewerToggleTags()" style="padding:5px 14px;background:rgba(255,255,255,0.15);color:white;border:1px solid rgba(255,255,255,0.4);border-radius:4px;cursor:pointer;font-size:13px;font-weight:600;">Tags On</button>
-                    <button id="viewerExportTasksCsvBtn" onclick="viewerExportTasksCsv()" title="Download a CSV with one task per unique New Value, for Navisworks TimeLiner (CSV Import)" style="padding:5px 14px;background:rgba(255,255,255,0.15);color:white;border:1px solid rgba(255,255,255,0.4);border-radius:4px;cursor:pointer;font-size:13px;font-weight:600;">Export CSV</button>
-                    <button id="viewerShowAllBtn" onclick="viewerShowAll()" style="display:none;padding:5px 14px;background:rgba(255,255,255,0.15);color:white;border:1px solid rgba(255,255,255,0.4);border-radius:4px;cursor:pointer;font-size:13px;font-weight:600;">Show All</button>
-                    <button id="viewerZoomSelectedBtn" onclick="viewerZoomSelected()" style="display:none;padding:5px 14px;background:rgba(255,255,255,0.15);color:white;border:1px solid rgba(255,255,255,0.4);border-radius:4px;cursor:pointer;font-size:13px;font-weight:600;">Zoom In</button>
+                    <h2 id="viewerModalTitle" class="viewer-title">Model Viewer</h2>
+                    <button id="viewerReorderBtn" class="viewer-hdr-btn" onclick="viewerReorder()" title="Number elements in the order you click them">Reorder values</button>
+                    <button id="viewerShowAllBtn" class="viewer-hdr-btn" onclick="viewerShowAll()" style="display:none;">Show all</button>
+                    <button id="viewerZoomSelectedBtn" class="viewer-hdr-btn" onclick="viewerZoomSelected()" style="display:none;">Zoom in</button>
                 </div>
-                <button class="viewer-close-btn" onclick="closeViewerModal()">&times;</button>
+                <div class="viewer-modal-right">
+                    <button id="viewerTagsBtn" class="viewer-hdr-btn" onclick="viewerToggleTags()">Tags on</button>
+                    <button id="viewerExportTasksCsvBtn" class="viewer-hdr-btn" onclick="viewerExportTasksCsv()" title="Download a CSV with one task per unique New Value, for Navisworks TimeLiner (CSV Import)">Export CSV</button>
+                    <button class="viewer-close-btn" onclick="closeViewerModal()" aria-label="Close viewer">&times;</button>
+                </div>
             </div>
             <div class="viewer-body">
                 <div class="viewer-sidebar">
                     <div class="viewer-sidebar-header">
                         Parameter Edit
                     </div>
+                    <!-- Reorder values controls; rendered by js/reorder.js while the mode is on -->
+                    <div id="reorderDock"></div>
                     <div class="viewer-sidebar-content">
                         <div id="paramEditPanel">
                             <div id="peViewerExtStatus" style="display:none;font-size:12px;line-height:1.5;margin-bottom:8px;"></div>
@@ -428,20 +197,24 @@ query CountEls($elementGroupId: ID!, $filter: ElementFilterInput, $pagination: P
     <!-- Parameter Explorer Modal -->
     <div id="paramExplorerModal" style="display:none;">
         <div id="paramExplorerContent">
-            <div id="paramExplorerHeader">
-                <div style="flex:0 0 auto;display:flex;align-items:center;gap:10px;">
-                    <button id="paramExplorerBackBtn" onclick="paramExplorerZoomOut()"
-                        style="display:none;background:rgba(255,255,255,0.18);border:1px solid rgba(255,255,255,0.4);
-                               color:white;padding:3px 10px;border-radius:4px;cursor:pointer;font-size:12px;white-space:nowrap;">
-                        &#8592; All Parameters
-                    </button>
-                    <div>
-                        <h2><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:middle;margin-right:7px;flex-shrink:0;opacity:0.9"><rect x="0" y="8" width="4" height="8" rx="1"/><rect x="6" y="4" width="4" height="12" rx="1"/><rect x="12" y="1" width="4" height="15" rx="1"/></svg>Parameter Explorer</h2>
-                        <span id="paramExplorerSubtitle"></span>
-                    </div>
+            <!-- Same action-row pattern as the main page: where you are on the left, the next step on the right -->
+            <div id="paramExplorerHeader" class="results-header action-row">
+                <button id="paramExplorerBackBtn" class="btn btn-secondary" onclick="paramExplorerZoomOut()" style="display:none;">
+                    &#8592; All parameters
+                </button>
+                <span id="paramExplorerSubtitle" class="action-summary"></span>
+                <div class="action-search">
+                    <input id="paramExplorerSearch" type="search" placeholder="Filter parameters" aria-label="Filter parameters" oninput="filterParamExplorerTreemap(this.value)">
                 </div>
-                <input id="paramExplorerSearch" type="text" placeholder="&#128269; Filter&hellip;" oninput="filterParamExplorerTreemap(this.value)">
-                <button id="paramExplorerCloseBtn" onclick="closeParameterExplorer()">&times;</button>
+                <div class="action-buttons">
+                    <span id="pePickerSelCount" class="action-count" style="display:none;">0 selected</span>
+                    <button id="pePickerLoadBtn" class="btn btn-execute" onclick="_peLoadCheckedValues()" style="display:none;" disabled>
+                        Load values
+                    </button>
+                    <button id="paramExplorerCloseBtn" class="btn btn-secondary" onclick="closeParameterExplorer()" title="Back to the file treemap">
+                        Back to files
+                    </button>
+                </div>
             </div>
             <div id="paramExplorerBody">
                 <!-- Extraction status banner — lives OUTSIDE the loading overlay so it
@@ -490,7 +263,6 @@ query CountEls($elementGroupId: ID!, $filter: ElementFilterInput, $pagination: P
     <script src="js/auth.js"></script>
     <script src="js/graphql.js"></script>
     <script src="js/reorder.js"></script>
-    <script src="js/bulkAssign.js"></script>
     <script src="js/tags.js"></script>
     <script src="js/timelinerExport.js"></script>
     <script src="js/viewer.js"></script>

@@ -14,6 +14,8 @@
         alphaCurrent: null,
         padding: 1,
         autoAdvance: true,
+        // "Same value for every click": clicks reuse the current value instead of counting up.
+        hold: false,
         activeRowIndex: -1,
         assignmentCounter: 0,
         selectedColor: '#00c853',
@@ -24,7 +26,9 @@
         lastPickKey: '',
         lastPickAt: 0,
         colorEpoch: 0,
-        lastAssignment: null,
+        // Assignments in click order, newest last: { row, prevNumber, prevAlphaCurrent }.
+        // Holds row objects rather than indexes because "Sort by pick order" re-sorts the rows array.
+        history: [],
         justDeselectedRevitId: null,
         justDeselectedAt: 0,
         assignedRevitIds: new Set()
@@ -255,12 +259,15 @@
 
             // Roll back the counter only if this was the most recent assignment,
             // so re-picking a different element next continues the sequence cleanly.
-            if (state.lastAssignment && state.lastAssignment.rowIndex === rowIndex) {
-                state.currentNumber = state.lastAssignment.prevNumber;
-                state.alphaCurrent = state.lastAssignment.prevAlphaCurrent;
-                state.lastAssignment = null;
-                updatePreview();
+            var last = state.history[state.history.length - 1];
+            if (last && last.row === row) {
+                state.history.pop();
+                state.currentNumber = last.prevNumber;
+                state.alphaCurrent = last.prevAlphaCurrent;
+            } else {
+                state.history = state.history.filter(function (h) { return h.row !== row; });
             }
+            updatePreview();
 
             state.activeRowIndex = rowIndex;
             setStatus('Deselected ' + (row.paramName || ('Row ' + (rowIndex + 1))) + '.');
@@ -466,67 +473,103 @@
         return buildValue(state.currentNumber + (offset * step));
     }
 
-    function nextValue() {
-        var out = peekValue(0);
+    function advanceCounter() {
         var step = Math.max(1, parseInt(state.step, 10) || 1);
         state.currentNumber += step;
         if (state.alphaEnabled && state.alphaCurrent !== null) {
             var aStep = Math.max(1, parseInt(state.alphaStep, 10) || 1);
             state.alphaCurrent += aStep;
         }
+    }
+
+    function nextValue() {
+        var out = peekValue(0);
+        if (!state.hold) advanceCounter();
         updatePreview();
         return out;
+    }
+
+    // Switching the counter back on moves past the held value if it was placed at least once,
+    // so the next click continues the sequence (L2-003, L2-003, L2-003, then L2-004).
+    function setHold(on) {
+        if (state.hold === on) return;
+        if (!on) {
+            var last = state.history[state.history.length - 1];
+            if (last && last.row.newValue === peekValue(0)) advanceCounter();
+        }
+        state.hold = on;
+        var card = document.querySelector('#reorderModal .reorder-next');
+        if (card) card.classList.toggle('is-held', on);
+        var box = document.getElementById('reorderHold');
+        if (box) box.checked = on;
+        updatePreview();
+        setStatus(on
+            ? 'Every click now gets ' + peekValue(0) + '.'
+            : 'Counting again from ' + peekValue(0) + '.');
     }
 
     function ensureModal() {
         var existing = document.getElementById('reorderModal');
         if (existing) return existing;
 
-        var modal = document.createElement('div');
+        var modal = document.createElement('section');
         modal.id = 'reorderModal';
-        modal.className = 'reorder-modal';
+        modal.className = 'reorder-dock';
+        modal.setAttribute('aria-label', 'Reorder values');
         modal.style.display = 'none';
         modal.innerHTML = '' +
-            '<div class="reorder-modal-header" id="reorderModalHeader">' +
-                '<span>Reorder Numbering</span>' +
-                '<button id="reorderCloseBtn" type="button" style="background:none;border:none;color:#fff;cursor:pointer;font-size:16px;line-height:1;">x</button>' +
+            '<div class="reorder-dock-head">' +
+                '<span class="reorder-dock-title">Reorder values</span>' +
+                '<button id="reorderDisableBtn" type="button" class="reorder-done">Done</button>' +
             '</div>' +
-            '<div class="reorder-modal-body">' +
-                '<div class="reorder-field">' +
-                    '<label for="reorderSeed">Seed value</label>' +
-                    '<input id="reorderSeed" type="text" value="test-1" placeholder="Example: test-1">' +
+            '<div class="reorder-next">' +
+                '<div class="reorder-next-meta">' +
+                    '<span id="reorderNextLabel">Next click gets</span>' +
+                    '<span id="reorderProgressText"></span>' +
                 '</div>' +
-                '<div class="reorder-field">' +
-                    '<label for="reorderStep">Increment step</label>' +
+                '<div class="reorder-next-value" id="reorderNextValue" aria-live="polite"></div>' +
+                '<div class="reorder-next-after" id="reorderPreview"></div>' +
+                '<label class="reorder-hold" for="reorderHold" title="Give several elements the same value, then switch off to continue counting">' +
+                    '<input id="reorderHold" type="checkbox" role="switch">' +
+                    '<span>Same value for every click</span>' +
+                '</label>' +
+                '<div class="reorder-progress" aria-hidden="true"><div id="reorderProgressBar"></div></div>' +
+            '</div>' +
+            '<div class="reorder-fields">' +
+                '<label class="reorder-field reorder-field-grow">Start at' +
+                    '<input id="reorderSeed" type="text" value="test-1" placeholder="L2-001" spellcheck="false">' +
+                '</label>' +
+                '<label class="reorder-field reorder-field-step">Step' +
                     '<input id="reorderStep" type="number" min="1" step="1" value="1">' +
-                '</div>' +
+                '</label>' +
+                '<label class="reorder-field reorder-field-color" title="Colour of numbered elements in the viewer">Colour' +
+                    '<input id="reorderColor" type="color" value="#00c853">' +
+                '</label>' +
+            '</div>' +
+            '<details class="reorder-more">' +
+                '<summary>More options</summary>' +
                 '<label class="reorder-checkbox-row" for="reorderAlphaEnabled">' +
                     '<input id="reorderAlphaEnabled" type="checkbox">' +
-                    '<span>Increment letters (A, B, C...)</span>' +
+                    '<span>Also step the letters (A-1, B-2, C-3)</span>' +
                 '</label>' +
-                '<div class="reorder-field">' +
-                    '<label for="reorderAlphaStep">Letter step</label>' +
+                '<label class="reorder-field reorder-field-inline">Letter step' +
                     '<input id="reorderAlphaStep" type="number" min="1" step="1" value="1">' +
-                '</div>' +
-                '<div class="reorder-field">' +
-                    '<label for="reorderColor">Picked element color</label>' +
-                    '<input id="reorderColor" type="color" value="#00c853">' +
-                '</div>' +
+                '</label>' +
                 '<label class="reorder-checkbox-row" for="reorderAutoAdvance">' +
                     '<input id="reorderAutoAdvance" type="checkbox" checked>' +
-                    '<span>Auto-advance to next row</span>' +
+                    '<span>Move to the next selected row after each click</span>' +
                 '</label>' +
-                '<div class="reorder-preview" id="reorderPreview"></div>' +
-                '<div class="reorder-actions">' +
-                    '<button id="reorderClearBtn" type="button">Clear</button>' +
-                    '<button id="reorderListBtn" type="button">Reorder in List</button>' +
-                    '<button id="reorderResetBtn" type="button">Reset Counter</button>' +
-                    '<button id="reorderDisableBtn" type="button" class="primary">Exit Reorder</button>' +
-                '</div>' +
-                '<div class="reorder-status" id="reorderStatus"></div>' +
-            '</div>';
+                '<button id="reorderResetBtn" type="button" class="reorder-link">Restart numbering at the start value</button>' +
+            '</details>' +
+            '<div class="reorder-actions">' +
+                '<button id="reorderUndoBtn" type="button">Undo</button>' +
+                '<button id="reorderListBtn" type="button" title="Sort the Parameter Edit list in the order you clicked">Sort by pick order</button>' +
+                '<button id="reorderClearBtn" type="button" class="reorder-danger" title="Remove every number placed in this session">Clear all</button>' +
+            '</div>' +
+            '<div class="reorder-status" id="reorderStatus" aria-live="polite"></div>';
 
-        document.body.appendChild(modal);
+        var dock = document.getElementById('reorderDock') || document.body;
+        dock.appendChild(modal);
 
         document.getElementById('reorderSeed').addEventListener('input', function (e) {
             parseSeed(e.target.value);
@@ -569,7 +612,7 @@
             state.alphaStep = (isNaN(alphaStepParsed) || alphaStepParsed < 1) ? 1 : alphaStepParsed;
             state.alphaEnabled = !!document.getElementById('reorderAlphaEnabled').checked;
             updatePreview();
-            setStatus('Counter reset to ' + peekValue(0));
+            setStatus('Numbering restarts at ' + peekValue(0) + '.');
         });
 
         document.getElementById('reorderClearBtn').addEventListener('click', function () {
@@ -580,59 +623,51 @@
             reorderRowsByAssignedOrder();
         });
 
+        document.getElementById('reorderHold').addEventListener('change', function (e) {
+            setHold(!!e.target.checked);
+        });
+
+        document.getElementById('reorderUndoBtn').addEventListener('click', function () {
+            undoLastAssignment();
+        });
+
         document.getElementById('reorderDisableBtn').addEventListener('click', function () {
             disable();
         });
 
-        document.getElementById('reorderCloseBtn').addEventListener('click', function () {
-            disable();
-        });
-
-        makeModalDraggable(modal, document.getElementById('reorderModalHeader'));
         updatePreview();
         return modal;
     }
 
-    function makeModalDraggable(modal, header) {
-        var startX = 0;
-        var startY = 0;
-        var left = 0;
-        var top = 0;
-        var dragging = false;
-
-        header.addEventListener('mousedown', function (e) {
-            dragging = true;
-            startX = e.clientX;
-            startY = e.clientY;
-            left = modal.offsetLeft;
-            top = modal.offsetTop;
-            document.body.style.userSelect = 'none';
-            e.preventDefault();
-        });
-
-        document.addEventListener('mousemove', function (e) {
-            if (!dragging) return;
-            var nextLeft = left + (e.clientX - startX);
-            var nextTop = top + (e.clientY - startY);
-            var maxLeft = Math.max(8, window.innerWidth - modal.offsetWidth - 8);
-            var maxTop = Math.max(8, window.innerHeight - modal.offsetHeight - 8);
-            modal.style.left = Math.min(Math.max(8, nextLeft), maxLeft) + 'px';
-            modal.style.top = Math.min(Math.max(8, nextTop), maxTop) + 'px';
-        });
-
-        document.addEventListener('mouseup', function () {
-            if (!dragging) return;
-            dragging = false;
-            document.body.style.userSelect = '';
-        });
+    function updatePreview() {
+        var next = document.getElementById('reorderNextValue');
+        var preview = document.getElementById('reorderPreview');
+        if (!next || !preview) return;
+        next.textContent = peekValue(0);
+        var label = document.getElementById('reorderNextLabel');
+        if (label) label.textContent = state.hold ? 'Every click gets' : 'Next click gets';
+        if (state.hold) {
+            preview.textContent = 'Counter paused. Switch off to continue with ' + peekValue(1) + '.';
+        } else {
+            preview.textContent = (state.alphaEnabled && state.alphaCurrent === null)
+                ? 'Add a letter to the start value to step letters, like A-1.'
+                : 'then ' + peekValue(1) + ', ' + peekValue(2) + ' \u2026';
+        }
+        updateProgress();
     }
 
-    function updatePreview() {
-        var preview = document.getElementById('reorderPreview');
-        if (!preview) return;
-        preview.textContent = 'Current: ' + peekValue(0) + ' | Next: ' + peekValue(1);
-        if (state.alphaEnabled && state.alphaCurrent === null) {
-            preview.textContent += ' (No letter token in prefix)';
+    function updateProgress() {
+        var text = document.getElementById('reorderProgressText');
+        var bar = document.getElementById('reorderProgressBar');
+        if (!text || !bar) return;
+        var rows = window._pendingParamEditRows || [];
+        var done = rows.filter(function (r) { return r && typeof r.__reorderOrdinal === 'number'; }).length;
+        text.textContent = done + ' of ' + rows.length + ' numbered';
+        bar.style.width = rows.length ? Math.round(done / rows.length * 100) + '%' : '0';
+        var undo = document.getElementById('reorderUndoBtn');
+        if (undo) {
+            var last = state.history[state.history.length - 1];
+            undo.title = last ? 'Remove ' + last.row.newValue + ', the last number you placed' : 'Nothing to undo yet';
         }
     }
 
@@ -645,7 +680,7 @@
         var btn = document.getElementById('viewerReorderBtn');
         if (!btn) return;
         btn.classList.toggle('reorder-active', !!active);
-        btn.textContent = active ? 'Reorder On' : 'Reorder';
+        btn.setAttribute('aria-pressed', active ? 'true' : 'false');
     }
 
     function clearAllPlacedValues() {
@@ -660,7 +695,7 @@
             input.value = '';
         });
         state.assignmentCounter = 0;
-        state.lastAssignment = null;
+        state.history = [];
         state.assignedRevitIds.clear();
         clearViewerHighlights();
         if (hasViewer() && typeof viewer.clearSelection === 'function') {
@@ -670,7 +705,33 @@
             viewer.impl.invalidate(true, true, true);
         }
         resetRevitColorCache();
-        setStatus('Cleared all assigned values and viewer highlights.');
+        if (window.ElementTags) window.ElementTags.refresh();
+        updatePreview();
+        setStatus('Cleared all numbers and viewer highlights.');
+    }
+
+    // Same effect as clicking the most recently numbered element again, without having to find it.
+    function undoLastAssignment() {
+        var last = state.history.pop();
+        if (!last) {
+            setStatus('Nothing to undo yet.');
+            return;
+        }
+        var rows = window._pendingParamEditRows || [];
+        var row = last.row;
+        var value = row.newValue;
+        row.newValue = '';
+        delete row.__reorderOrdinal;
+        var idx = rows.indexOf(row);
+        if (idx >= 0) syncInputAt(idx, '');
+        (row.revitIds || []).forEach(function (rid) { state.assignedRevitIds.delete(String(rid)); });
+        state.currentNumber = last.prevNumber;
+        state.alphaCurrent = last.prevAlphaCurrent;
+        state.activeRowIndex = idx;
+        recolorAllAssignedRows();
+        if (window.ElementTags) window.ElementTags.refresh();
+        updatePreview();
+        setStatus('Removed ' + value + ' from ' + (row.paramName || 'the row') + '.');
     }
 
     function reorderRowsByAssignedOrder() {
@@ -693,7 +754,7 @@
         if (window._peTableState) { window._peTableState.sort = null; window._peTableState.fileSort = {}; } // show the list's new order
         if (panel && typeof _peRenderParamTable === 'function') {
             _peRenderParamTable(panel, rows);
-            setStatus('Reordered list by assignment sequence.');
+            setStatus('List sorted in the order you clicked.');
         } else {
             setStatus('Rows reordered in data, but table render function was not found.');
         }
@@ -868,7 +929,7 @@
             var targetIdx = pickTargetRowIndex(rows, revitId);
             if (targetIdx < 0 || !rows[targetIdx]) {
                 // No matching row for this element — don't tint it, there'd be nothing to undo later.
-                setStatus('Select a row in the left panel first.');
+                setStatus("That element isn't in the Parameter Edit list.");
                 return;
             }
 
@@ -886,9 +947,10 @@
             rows[targetIdx].__reorderOrdinal = state.assignmentCounter++;
             (rows[targetIdx].revitIds || []).forEach(function (rid) { state.assignedRevitIds.add(String(rid)); });
             state.activeRowIndex = targetIdx;
-            state.lastAssignment = { rowIndex: targetIdx, prevNumber: snapshotNumber, prevAlphaCurrent: snapshotAlpha };
+            state.history.push({ row: rows[targetIdx], prevNumber: snapshotNumber, prevAlphaCurrent: snapshotAlpha });
             syncInputAt(targetIdx, value);
             advanceTarget(rows);
+            updatePreview();
             if (window.ElementTags) window.ElementTags.refresh();
 
             var rowName = rows[targetIdx].paramName || ('Row ' + (targetIdx + 1));
@@ -911,12 +973,8 @@
 
     function enable() {
         if (!document.getElementById('peParamTbody')) {
-            alert('Open and populate the Parameter Edit list first, then enable Reorder.');
+            alert('Load parameter values into the Parameter Edit list first, then turn on Reorder values.');
             return;
-        }
-
-        if (window.BulkAssignController && window.BulkAssignController.isEnabled && window.BulkAssignController.isEnabled()) {
-            window.BulkAssignController.disable();
         }
 
         ensureModal();
@@ -944,7 +1002,7 @@
             resetRevitColorCache();
         }
 
-        setStatus('Reorder mode enabled. Click elements in the viewer to fill New Value cells.');
+        setStatus('Click elements in the viewer to number them. Click a coloured one again to remove its number.');
     }
 
     function disable() {
@@ -953,7 +1011,12 @@
         state.colorEpoch += 1; // cancel any pending delayed recolor callbacks
         state.lastPickKey = '';
         state.lastPickAt = 0;
-        state.lastAssignment = null;
+        state.history = [];
+        state.hold = false;
+        var holdBox = document.getElementById('reorderHold');
+        if (holdBox) holdBox.checked = false;
+        var nextCard = document.querySelector('#reorderModal .reorder-next');
+        if (nextCard) nextCard.classList.remove('is-held');
         state.pickedEntries.clear();
         resetRevitColorCache();
         state.dbIdToRevitId = new Map();

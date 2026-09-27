@@ -12,6 +12,22 @@ body {
     color: #3c3c3c;
     font-size: 14px;
     -webkit-font-smoothing: antialiased;
+    display: flex;
+    flex-direction: column;
+}
+
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+}
+
+:focus-visible {
+    outline: 2px solid #0696d7;
+    outline-offset: 2px;
 }
 
 /* Header */
@@ -30,6 +46,35 @@ body {
 
 .header-left {
     flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    min-width: 0;
+}
+
+.header-hub {
+    display: flex;
+    min-width: 0;
+}
+
+/* Hub picker sits on the dark header bar */
+.form-select.header-select {
+    width: auto;
+    min-width: 220px;
+    max-width: 360px;
+    background-color: rgba(255,255,255,0.08);
+    color: white;
+    border-color: rgba(255,255,255,0.3);
+}
+
+.form-select.header-select:hover {
+    border-color: rgba(255,255,255,0.6);
+}
+
+.form-select.header-select option,
+.form-select.header-select optgroup {
+    color: #3c3c3c;
+    background: white;
 }
 
 .header-title {
@@ -42,6 +87,110 @@ body {
 .header-right {
     display: flex;
     gap: 10px;
+}
+
+.btn-icon-only {
+    width: 32px;
+    padding: 0;
+    justify-content: center;
+}
+
+.btn svg {
+    flex-shrink: 0;
+    width: 16px;
+    height: 16px;
+}
+
+.btn-execute svg,
+.btn-secondary svg {
+    width: 14px;
+    height: 14px;
+}
+
+/* ── Step rail: Query hub → Pick files → Pick parameters → Edit in viewer ── */
+.flow-bar {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 0 20px;
+    height: 40px;
+    background: white;
+    border-bottom: 1px solid #d5dbe1;
+    flex-shrink: 0;
+}
+
+.flow-steps {
+    display: flex;
+    align-items: center;
+    list-style: none;
+    gap: 6px;
+}
+
+.flow-step {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 13px;
+    color: #8a939c;
+    white-space: nowrap;
+}
+
+.flow-step + .flow-step::before {
+    content: '';
+    width: 28px;
+    height: 1px;
+    background: #d5dbe1;
+    margin-right: 6px;
+}
+
+.flow-dot {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    border: 1px solid #c3cbd3;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.flow-step.current {
+    color: #0a131c;
+    font-weight: 600;
+}
+
+.flow-step.current .flow-dot {
+    background: #0696d7;
+    border-color: #0696d7;
+    color: white;
+}
+
+.flow-step.done {
+    color: #3c3c3c;
+}
+
+.flow-step.done .flow-dot {
+    background: #e3f4fc;
+    border-color: #9fd3ee;
+    color: #0570a3;
+    font-size: 0;
+}
+
+.flow-step.done .flow-dot::after {
+    content: '\2713';
+    font-size: 11px;
+}
+
+.flow-step.done + .flow-step::before {
+    background: #9fd3ee;
+}
+
+.flow-bar .results-stats {
+    margin-left: auto;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .btn {
@@ -108,7 +257,8 @@ body {
 /* Main Layout */
 .main-layout {
     display: flex;
-    height: calc(100vh - 60px);
+    flex: 1;
+    min-height: 0;
 }
 
 /* Content Area */
@@ -296,6 +446,53 @@ body {
     min-height: 48px;
 }
 
+/* Main page action row: Run query before results; filter + next actions after */
+.results-header.action-row {
+    justify-content: flex-start;
+    background: white;
+}
+
+.action-search {
+    flex: 1;
+    min-width: 160px;
+    max-width: 520px;
+}
+
+.action-search input {
+    width: 100%;
+    height: 32px;
+    padding: 0 12px;
+    border: 1px solid #d5dbe1;
+    border-radius: 4px;
+    font: inherit;
+    font-size: 13px;
+    color: #3c3c3c;
+}
+
+.action-search input:hover { border-color: #939ca5; }
+.action-search input:focus { outline: none; border-color: #0696d7; box-shadow: 0 0 0 2px rgba(6,150,215,0.2); }
+
+.action-buttons {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+}
+
+.action-count {
+    font-size: 13px;
+    color: #6a6a6a;
+    white-space: nowrap;
+    margin-right: 4px;
+}
+
+.treemap-empty {
+    padding: 80px 20px;
+    text-align: center;
+    color: #6a737c;
+    font-size: 14px;
+}
+
 .results-header h3 {
     margin: 0;
     color: #333;
@@ -380,8 +577,8 @@ body {
     align-items: center;
     gap: 12px;
     flex-wrap: wrap;
-    padding: 10px 16px;
-    background: #f2f4f6;
+    padding: 8px 16px;
+    background: white;
     border-bottom: 1px solid #d5dbe1;
     border-radius: 4px 4px 0 0;
     margin-bottom: 4px;
@@ -390,9 +587,9 @@ body {
 .btn-zoom-back {
     padding: 0 14px;
     height: 28px;
-    background: #0696d7;
-    color: #fff;
-    border: none;
+    background: white;
+    color: #0570a3;
+    border: 1px solid #d5dbe1;
     border-radius: 4px;
     cursor: pointer;
     font-size: 13px;
@@ -403,7 +600,7 @@ body {
     align-items: center;
     transition: background 0.15s;
 }
-.btn-zoom-back:hover { background: #0484bd; }
+.btn-zoom-back:hover { background: #f2f4f6; border-color: #b0bac4; }
 
 .zoom-breadcrumb {
     font-size: 13px;
@@ -765,10 +962,11 @@ body {
 }
 
 /* ── Parameter Explorer Modal ─────────────────────────────── */
+/* Opens below the header and step rail, which stay visible (48px header + 40px rail) */
 #paramExplorerModal {
     position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.55);
+    inset: 88px 0 0 0;
+    background: white;
     z-index: 3000;
     display: flex;
     align-items: stretch;
@@ -784,50 +982,24 @@ body {
 }
 
 #paramExplorerHeader {
-    background: #0a131c;
-    color: white;
-    padding: 0 20px;
-    height: 48px;
-    display: flex;
-    align-items: center;
-    gap: 16px;
     flex-shrink: 0;
 }
 
-#paramExplorerHeader h2 {
-    margin: 0;
-    font-size: 16px;
-    font-weight: 700;
-    white-space: nowrap;
-}
-
-#paramExplorerSubtitle {
-    font-size: 12px;
-    opacity: 0.8;
-    white-space: nowrap;
-}
-
-#paramExplorerSearch {
-    flex: 1;
-    padding: 6px 12px;
-    border: none;
-    border-radius: 4px;
+.action-summary {
     font-size: 13px;
-    outline: none;
-    min-width: 0;
-    max-width: 320px;
-    margin-left: auto;
+    font-weight: 600;
+    color: #0a131c;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 40%;
 }
 
-#paramExplorerCloseBtn {
-    background: none;
-    border: none;
-    color: white;
-    font-size: 26px;
-    cursor: pointer;
-    line-height: 1;
-    padding: 0;
-    flex-shrink: 0;
+.action-summary:empty { display: none; }
+
+#pePickerLoadBtn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
 }
 
 #paramExplorerBody {
@@ -910,8 +1082,8 @@ body {
 #pePickerRightHeader button {
     background: none;
     border: none;
-    font-size: 11px;
-    color: #aaa;
+    font-size: 12px;
+    color: #6a737c;
     cursor: pointer;
     padding: 2px 6px;
     border-radius: 3px;
@@ -925,7 +1097,7 @@ body {
 #pePickerEmptyHint {
     padding: 24px 14px;
     text-align: center;
-    color: #bbb;
+    color: #8a939c;
     font-size: 12px;
     line-height: 1.7;
 }
@@ -956,19 +1128,27 @@ body {
     line-height: 1;
 }
 .pe-picker-chip button:hover { color: #c62828; background: #fde8e8; }
-#pePickerRightFooter {
-    padding: 10px 12px;
-    border-top: 1px solid #e8eaed;
-    flex-shrink: 0;
+
+/* Value selection after Load values: same shape as the main page action row */
+.pe-sel-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    min-height: 44px;
+    padding: 6px 12px;
+    margin: 4px 4px 0;
+    background: white;
+    border: 1px solid #d5dbe1;
+    border-radius: 6px;
+    font-size: 13px;
+    color: #3c3c3c;
 }
-#pePickerLoadBtn {
-    width: 100%;
-    padding: 8px 14px;
-}
-#pePickerLoadBtn:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-}
+
+.pe-sel-bar .pe-sel-count { margin-right: auto; }
+.pe-sel-bar .pe-sel-hint { color: #6a737c; }
+.pe-sel-bar .btn { height: 30px; font-size: 13px; }
+.pe-sel-bar .btn:disabled { opacity: 0.5; cursor: progress; }
 
 #paramExplorerLoading {
     position: absolute;
@@ -1308,47 +1488,52 @@ body {
     align-items: center;
 }
 
-.viewer-modal-left {
+.viewer-modal-left,
+.viewer-modal-right {
     display: flex;
     align-items: center;
     gap: 8px;
+    min-width: 0;
 }
+
+.viewer-title {
+    margin: 0 8px 0 0;
+    color: white;
+    font-size: 15px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 320px;
+}
+
+.viewer-hdr-btn {
+    height: 28px;
+    padding: 0 12px;
+    background: transparent;
+    color: white;
+    border: 1px solid rgba(255,255,255,0.35);
+    border-radius: 4px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+.viewer-hdr-btn:hover {
+    background: rgba(255,255,255,0.12);
+    border-color: rgba(255,255,255,0.6);
+}
+
 
 #viewerReorderBtn.reorder-active {
     background: #0696d7 !important;
     border-color: #3db7ea !important;
 }
 
-.reorder-modal {
-    position: fixed;
-    top: 76px;
-    left: 24px;
-    width: 300px;
-    background: #ffffff;
-    border: 1px solid #cfd8e3;
-    border-radius: 8px;
-    box-shadow: 0 12px 28px rgba(10, 19, 28, 0.24);
-    z-index: 12000;
-    font-family: 'ArtifaktElement', 'Helvetica Neue', Arial, sans-serif;
-}
 
-.reorder-modal-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 8px 10px;
-    background: #0a131c;
-    color: #fff;
-    border-radius: 8px 8px 0 0;
-    cursor: move;
-    user-select: none;
-    font-size: 13px;
-    font-weight: 600;
-}
 
-.reorder-modal-body {
-    padding: 10px;
-}
 
 .reorder-field {
     margin-bottom: 8px;
@@ -1383,15 +1568,6 @@ body {
     margin: 8px 0;
 }
 
-.reorder-preview {
-    margin-top: 6px;
-    background: #f5f9fc;
-    border: 1px solid #d7e4f0;
-    border-radius: 4px;
-    padding: 6px 8px;
-    font-size: 12px;
-    color: #1f2d3a;
-}
 
 .reorder-actions {
     display: flex;
@@ -1411,11 +1587,6 @@ body {
     cursor: pointer;
 }
 
-.reorder-actions button.primary {
-    background: #0696d7;
-    border-color: #0696d7;
-    color: #fff;
-}
 
 .reorder-status {
     font-size: 11px;
@@ -1424,43 +1595,10 @@ body {
     min-height: 15px;
 }
 
-#viewerBulkAssignBtn.bulk-assign-active {
-    background: #ff9800 !important;
-    border-color: #ffb74d !important;
-}
 
-.bulk-assign-list {
-    max-height: 160px;
-    overflow-y: auto;
-    border: 1px solid #d7e4f0;
-    border-radius: 4px;
-    background: #f5f9fc;
-}
 
-.bulk-assign-item {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 6px;
-    padding: 5px 8px;
-    font-size: 11px;
-    color: #1f2d3a;
-    border-bottom: 1px solid #e2ebf3;
-}
 
-.bulk-assign-item:last-child {
-    border-bottom: none;
-}
 
-.bulk-assign-remove {
-    background: none;
-    border: none;
-    color: #b23c3c;
-    cursor: pointer;
-    font-size: 14px;
-    line-height: 1;
-    padding: 0 2px;
-}
 
 .viewer-modal-header h3 {
     margin: 0;
@@ -1649,4 +1787,257 @@ body {
     white-space: nowrap;
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
     will-change: transform;
+}
+
+/* ── Reorder values, docked above the Parameter Edit table (js/reorder.js) ── */
+.reorder-dock {
+    flex-shrink: 0;
+    padding: 10px 12px 12px;
+    background: white;
+    border-bottom: 1px solid #d5dbe1;
+    font-family: 'ArtifaktElement', 'Helvetica Neue', Arial, sans-serif;
+}
+
+.reorder-dock-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+}
+
+.reorder-dock-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #0a131c;
+}
+
+.reorder-done {
+    height: 26px;
+    padding: 0 14px;
+    background: #0696d7;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.reorder-done:hover { background: #0484bd; }
+
+/* The value the next viewer click will place: the one thing to read while clicking */
+.reorder-next {
+    background: #e3f4fc;
+    border: 1px solid #9fd3ee;
+    border-radius: 6px;
+    padding: 8px 12px 10px;
+    color: #0570a3;
+}
+
+.reorder-next-meta {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+}
+
+.reorder-next-value {
+    font-size: 28px;
+    font-weight: 700;
+    line-height: 1.15;
+    color: #0a4f75;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.01em;
+    overflow-wrap: anywhere;
+}
+
+.reorder-next-after {
+    font-size: 11px;
+    min-height: 15px;
+}
+
+/* Same value for every click: the card turns amber while the counter is paused */
+.reorder-hold {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+    font-size: 12px;
+    color: #0a4f75;
+    cursor: pointer;
+    user-select: none;
+}
+
+.reorder-hold input {
+    appearance: none;
+    -webkit-appearance: none;
+    position: relative;
+    width: 28px;
+    height: 16px;
+    margin: 0;
+    flex-shrink: 0;
+    border-radius: 8px;
+    background: #b6c7d6;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.reorder-hold input::after {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: white;
+    transition: transform 0.15s;
+}
+
+.reorder-hold input:checked { background: #b26a00; }
+.reorder-hold input:checked::after { transform: translateX(12px); }
+
+.reorder-next.is-held {
+    background: #fff4e0;
+    border-color: #f0c67a;
+    color: #8a5300;
+}
+
+.reorder-next.is-held .reorder-next-value { color: #6b3f00; }
+.reorder-next.is-held .reorder-hold { color: #6b3f00; }
+.reorder-next.is-held .reorder-progress > div { background: #b26a00; }
+
+.reorder-progress {
+    height: 4px;
+    margin-top: 8px;
+    background: white;
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.reorder-progress > div {
+    height: 100%;
+    width: 0;
+    background: #0696d7;
+    transition: width 0.2s ease;
+}
+
+.reorder-fields {
+    display: flex;
+    gap: 6px;
+    margin-top: 10px;
+    align-items: flex-end;
+}
+
+.reorder-dock .reorder-field {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    margin: 0;
+    font-size: 11px;
+    font-weight: 600;
+    color: #5d6e7f;
+}
+
+.reorder-dock .reorder-field-grow { flex: 1; min-width: 0; }
+.reorder-dock .reorder-field-step { width: 52px; }
+
+.reorder-dock .reorder-field input[type="text"],
+.reorder-dock .reorder-field input[type="number"] {
+    height: 28px;
+    font: inherit;
+    font-weight: 400;
+    font-size: 13px;
+    color: #1f2d3a;
+}
+
+.reorder-dock .reorder-field input[type="color"] {
+    width: 34px;
+    height: 28px;
+    padding: 2px;
+    border: 1px solid #bcc8d6;
+    border-radius: 4px;
+    background: white;
+    cursor: pointer;
+}
+
+.reorder-more {
+    margin-top: 8px;
+    font-size: 12px;
+    color: #2e3a45;
+}
+
+.reorder-more summary {
+    cursor: pointer;
+    color: #0570a3;
+    font-size: 12px;
+    user-select: none;
+}
+
+.reorder-more[open] {
+    padding-bottom: 4px;
+    border-bottom: 1px solid #e2ebf3;
+}
+
+.reorder-dock .reorder-field-inline {
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    margin: 0 0 4px 22px;
+}
+
+.reorder-dock .reorder-field-inline input { width: 52px; }
+
+.reorder-link {
+    background: none;
+    border: none;
+    padding: 2px 0;
+    color: #0570a3;
+    font: inherit;
+    font-size: 12px;
+    text-decoration: underline;
+    cursor: pointer;
+}
+
+.reorder-dock .reorder-actions {
+    margin-top: 10px;
+    flex-wrap: nowrap;
+}
+
+.reorder-dock .reorder-actions button {
+    flex: 1 1 auto;
+    padding: 6px 6px;
+    white-space: nowrap;
+    font-family: inherit;
+}
+
+.reorder-dock .reorder-actions button:hover { background: #f2f4f6; }
+.reorder-dock .reorder-actions button.reorder-danger { color: #b23c3c; }
+
+.reorder-dock .reorder-status {
+    line-height: 1.4;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .reorder-progress > div,
+    .reorder-hold input,
+    .reorder-hold input::after { transition: none; }
+}
+
+/* ── Narrow windows: keep the header, step rail and action rows from overlapping ── */
+.header-title { white-space: nowrap; }
+.header-hub { flex: 1; max-width: 360px; }
+.form-select.header-select { min-width: 0; width: 100%; }
+.flow-steps { min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.results-header.action-row { flex-wrap: wrap; }
+
+@media (max-width: 760px) {
+    .header { padding: 0 12px; gap: 8px; }
+    .header-left { gap: 10px; }
+    .flow-bar { padding: 0 12px; }
+    .flow-bar .results-stats { display: none; }
+    .flow-step:not(.current) { font-size: 0; gap: 0; }
+    .flow-step + .flow-step::before { width: 14px; }
+    .action-search { max-width: none; flex-basis: 100%; order: 3; }
+    .action-buttons { margin-left: 0; flex-wrap: wrap; }
 }

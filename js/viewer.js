@@ -126,6 +126,7 @@ function openViewerModal(elementGroups) {
     title.textContent = files.length > 1 ? `${files.length} models` : primary.name;
     loading.style.display = 'block';
     modal.classList.add('active');
+    setFlowStep(4);
     _initSidebarResize();
 
     // Populate parameter edit panel with any pending selection
@@ -153,6 +154,7 @@ function openViewerModal(elementGroups) {
 function closeViewerModal() {
     const modal = document.getElementById('viewerModal');
     modal.classList.remove('active');
+    setFlowStep(flowStepBehindViewer());
     
     // Remove viewer selection event listeners
     if (viewer) {
@@ -666,10 +668,6 @@ function handleViewerSelection(event) {
         window.ReorderController.onViewerSelection(event, false);
         return;
     }
-    if (window.BulkAssignController && window.BulkAssignController.isEnabled && window.BulkAssignController.isEnabled()) {
-        window.BulkAssignController.onViewerSelection(event, false);
-        return;
-    }
 
     const dbIds = event.dbIdArray;
     
@@ -713,10 +711,6 @@ function handleViewerSelection(event) {
 function handleAggregateViewerSelection(event) {
     if (window.ReorderController && window.ReorderController.isEnabled && window.ReorderController.isEnabled()) {
         window.ReorderController.onViewerSelection(event, true);
-        return;
-    }
-    if (window.BulkAssignController && window.BulkAssignController.isEnabled && window.BulkAssignController.isEnabled()) {
-        window.BulkAssignController.onViewerSelection(event, true);
         return;
     }
 
@@ -805,7 +799,7 @@ function _peRenderParamTable(panel, rows) {
     // Sortable headers: click → ascending, again → descending, third click → original order.
     [['element', 'Element'], ['param', 'Parameter'], ['current', 'Current'], ['newValue', 'New Value']].forEach(function(c) {
         const arrow = st.sort && st.sort.col === c[0] ? (st.sort.dir > 0 ? ' \u25b2' : ' \u25bc') : '';
-        html += '<th class="pe-sort-th" data-sort="' + c[0] + '" title="Sort by ' + c[1] + ' (click again to reverse; a third click restores the original order)" style="padding:7px 6px;text-align:left;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;position:relative;cursor:pointer;">'
+        html += '<th class="pe-sort-th" data-sort="' + c[0] + '" title="Sort by ' + c[1] + ' (click again to reverse; a third click restores the original order)" style="padding:7px 6px;text-align:left;font-weight:600;font-size:12px;position:relative;cursor:pointer;">'
              + c[1] + '<span style="font-size:9px;">' + arrow + '</span><div class="pe-col-resize" style="position:absolute;right:0;top:0;width:5px;height:100%;cursor:col-resize;z-index:1;"></div></th>';
     });
     html += '</tr></thead>';
@@ -855,9 +849,9 @@ function _peRenderParamTable(panel, rows) {
     html += '</tbody></table></div>';
     var fileCount = (window._pendingDAFileContexts || []).length;
     var btnLabel = fileCount > 1
-        ? 'Apply via Design Automation (' + fileCount + ' files) \u25ba'
-        : 'Apply via Design Automation \u25ba';
-    html += '<button onclick="applyParamChangesViaDA()" style="margin-top:10px;width:100%;padding:9px 16px;background:#0696d7;color:white;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:600;font-family:\'ArtifaktElement\',\'Helvetica Neue\',Arial,sans-serif;letter-spacing:0.01em;transition:background 0.15s;">' + btnLabel + '</button>';
+        ? 'Apply changes to ' + fileCount + ' Revit files'
+        : 'Apply changes to the Revit file';
+    html += '<button onclick="applyParamChangesViaDA()" title="Writes the New Value column into the Revit files with Design Automation" style="margin-top:10px;width:100%;padding:9px 16px;background:#0696d7;color:white;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:600;font-family:\'ArtifaktElement\',\'Helvetica Neue\',Arial,sans-serif;letter-spacing:0.01em;transition:background 0.15s;">' + btnLabel + '</button>';
     panel.innerHTML = html;
     _peBindTableEvents();
     _peBindResizeHandles();

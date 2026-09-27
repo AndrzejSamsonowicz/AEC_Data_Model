@@ -5,24 +5,6 @@
 // AEC Data Model Query Examples
 
 
-// Copy query function
-function copyQuery(exampleNumber) {
-    const queryElement = document.getElementById(`example${exampleNumber}Query`);
-    const text = queryElement.textContent;
-    
-    navigator.clipboard.writeText(text).then(() => {
-        const btn = event.target;
-        const originalText = btn.textContent;
-        btn.textContent = 'Copied!';
-        btn.style.background = '#4CAF50';
-        
-        setTimeout(() => {
-            btn.textContent = originalText;
-            btn.style.background = '#0696d7';
-        }, 2000);
-    });
-}
-
 // Example 1: Cross-Hub Element Search
 // Store pagination state for Example 1
 let example1State = {
@@ -755,6 +737,7 @@ function createTreemapVisualization(fileSummary, category) {
         if (actionBar) actionBar.style.display = 'flex';
         const execBtn = document.getElementById('executeQueryBtn');
         if (execBtn) execBtn.style.display = 'none';
+        setFlowStep(2);
     }
     const container = document.getElementById('example1Treemap');
     container.innerHTML = '';
@@ -775,9 +758,9 @@ function createTreemapVisualization(fileSummary, category) {
         crumb.className = 'zoom-bar';
         crumb.style.marginBottom = '8px';
         crumb.innerHTML =
-            `<button class="btn-zoom-back" onclick="example1State.projectFilter=null;createTreemapVisualization(example1State.fileSummary,example1State.category)">← All Projects</button>` +
+            `<button class="btn-zoom-back" onclick="example1State.projectFilter=null;createTreemapVisualization(example1State.fileSummary,example1State.category)">\u2190 All projects</button>` +
             `<span style="font-weight:600;color:#3c3c3c;">${activeProjectFilter}</span>` +
-            `<span style="opacity:0.55;font-size:11px;">· click file to inspect · ⇧+click to select</span>`;
+            `<span style="color:#6a737c;font-size:12px;">Click a file to inspect it. Shift+click to select it.</span>`;
         container.appendChild(crumb);
     }
 
@@ -1222,7 +1205,9 @@ function _resetToNewQuery() {
     selectedEgIds.clear();
     selectMode = false;
     example1State._queryBarShown = false;
-    document.getElementById('example1Treemap').innerHTML = '';
+    document.getElementById('example1Treemap').innerHTML =
+        '<div class="treemap-empty">Run the query to map the Revit files in this hub.</div>';
+    setFlowStep(1);
     const sb = document.getElementById('treemapSearchBar');
     if (sb) { sb.style.display = 'none'; }
     document.getElementById('example1Stats').textContent = '';
@@ -1235,6 +1220,9 @@ function _resetToNewQuery() {
 document.addEventListener('DOMContentLoaded', function () {
     const hubSelect = document.getElementById('hubSelect');
     if (hubSelect) hubSelect.addEventListener('change', function () {
+        // The explorer shows parameters of the previous hub's files, so it closes too.
+        const explorer = document.getElementById('paramExplorerModal');
+        if (explorer && explorer.style.display !== 'none') closeParameterExplorer();
         if (example1State && example1State._queryBarShown) _resetToNewQuery();
     });
 });

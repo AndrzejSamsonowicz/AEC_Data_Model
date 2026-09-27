@@ -42,6 +42,7 @@ async function _peLoadCheckedValues(forceElementScan = true) {
     const backBtn   = document.getElementById('paramExplorerBackBtn');
 
     loading.style.display = 'none';   // keep overlay hidden – live treemap renders show progress
+    _peShowPickerActions(false);
     paramExplorerZoomState   = null;
     window._peHiddenFiles    = new Set(); // reset file filter on each new load
     window._peCategoryFilter = new Set(); // reset category filter on each new load
@@ -575,6 +576,7 @@ function closeParameterExplorer() {
     }
     const modal = document.getElementById('paramExplorerModal');
     if (modal) modal.style.display = 'none';
+    setFlowStep(2);
     if (paramExplorerTooltip) paramExplorerTooltip.style.display = 'none';
     paramExplorerZoomState = null;
     window._paramExplorerAgg = null;
@@ -928,8 +930,8 @@ function _peBuildLegend(allFilesForLegend, fileColor) {
         'font-size:11px', 'color:#333', 'align-items:center'
     ].join(';');
     const lbl = document.createElement('span');
-    lbl.style.cssText = 'font-weight:600;color:#888;margin-right:4px;flex-shrink:0;font-size:10px;text-transform:uppercase;letter-spacing:.04em;';
-    lbl.textContent = 'Filter files:';
+    lbl.style.cssText = 'font-weight:600;color:#888;margin-right:4px;flex-shrink:0;font-size:10px;';
+    lbl.textContent = 'Show files:';
     legendEl.appendChild(lbl);
     allFilesForLegend.forEach(f => {
         const isHidden = hidden.has(f);
@@ -1278,7 +1280,7 @@ function _peUpdateZoomSelBar(paramName) {
     if (!bar) return;
     const sel = window._peZoomSelected || new Set();
     if (sel.size === 0) {
-        bar.innerHTML = '<span style="color:#bbb;font-size:12px;">Click tiles to select \xb7 then use Show in Viewer \u25ba</span>';
+        bar.innerHTML = '<span class="pe-sel-hint">Click values to select them, then show them in the viewer.</span>';
         return;
     }
     let totalEls = 0;
@@ -1319,12 +1321,12 @@ function _peUpdateZoomSelBar(paramName) {
         : `<strong>${sel.size}</strong> ${isNameView ? 'name' : 'value'}${sel.size > 1 ? 's' : ''} selected &nbsp;\xb7&nbsp; <strong>${totalEls.toLocaleString()}</strong> element${totalEls !== 1 ? 's' : ''}`;
 
     const viewerBtn = scanInProgress
-        ? `<button id="peZoomSelView" disabled style="padding:4px 14px;font-size:12px;background:#b0bec5;color:white;border:none;border-radius:4px;cursor:not-allowed;font-weight:600;" title="Scan still running \u2014 please wait">\u23f3 Scanning\u2026</button>`
-        : `<button id="peZoomSelView" style="padding:4px 14px;font-size:12px;background:#0696d7;color:white;border:none;border-radius:4px;cursor:pointer;font-weight:600;">Show in Viewer \u25ba</button>`;
+        ? `<button id="peZoomSelView" class="btn btn-execute" disabled title="Still scanning the selected files">Scanning\u2026</button>`
+        : `<button id="peZoomSelView" class="btn btn-execute">Show in viewer</button>`;
 
     bar.innerHTML =
-        `<span>${selLabel}</span>` +
-        `<button id="peZoomSelClear" style="margin-left:auto;padding:4px 10px;font-size:12px;background:transparent;color:#c62828;border:1px solid #ef9a9a;border-radius:4px;cursor:pointer;">\u2715 Clear</button>` +
+        `<span class="pe-sel-count">${selLabel}</span>` +
+        `<button id="peZoomSelClear" class="btn btn-secondary">Clear</button>` +
         viewerBtn;
     document.getElementById('peZoomSelClear').addEventListener('click', _peClearZoomSelection);
     if (!scanInProgress) document.getElementById('peZoomSelView').addEventListener('click', _peOpenSelectedInViewer);
@@ -1497,8 +1499,8 @@ function _peRenderZoomNames(byValue, paramName, container, nameAgg) {
             bar.appendChild(seg);
         } else {
             const lbl = document.createElement('span');
-            lbl.style.cssText = 'font-weight:600;color:#888;margin-right:4px;flex-shrink:0;font-size:10px;text-transform:uppercase;letter-spacing:.04em;';
-            lbl.textContent = activeMode === 'file' ? 'Filter files:' : 'Filter category:';
+            lbl.style.cssText = 'font-weight:600;color:#888;margin-right:4px;flex-shrink:0;font-size:10px;';
+            lbl.textContent = activeMode === 'file' ? 'Show files:' : 'Show categories:';
             bar.appendChild(lbl);
         }
 
@@ -1570,7 +1572,7 @@ function _peRenderZoomNames(byValue, paramName, container, nameAgg) {
     const selBar = document.createElement('div');
     selBar.id = 'peZoomSelBar';
     selBar.dataset.paramname = paramName;
-    selBar.style.cssText = 'display:flex;padding:7px 12px;background:#f0f7ff;border:1px solid #b8d9f5;border-radius:6px;margin:4px 4px 0;flex-direction:row;align-items:center;gap:10px;font-size:13px;flex-wrap:wrap;';
+    selBar.className = 'pe-sel-bar';
     container.appendChild(selBar);
     _peUpdateZoomSelBar(paramName);
 
@@ -1743,7 +1745,7 @@ function _peRenderZoomElements(byValue, paramName, container, nameAgg, drillName
     const selBar = document.createElement('div');
     selBar.id = 'peZoomSelBar';
     selBar.dataset.paramname = paramName;
-    selBar.style.cssText = 'display:flex;padding:7px 12px;background:#f0f7ff;border:1px solid #b8d9f5;border-radius:6px;margin:4px 4px 0;flex-direction:row;align-items:center;gap:10px;font-size:13px;flex-wrap:wrap;';
+    selBar.className = 'pe-sel-bar';
     container.appendChild(selBar);
     _peUpdateZoomSelBar(paramName);
 
@@ -1816,7 +1818,7 @@ function _peRenderZoomElements(byValue, paramName, container, nameAgg, drillName
             `<div><span style="opacity:.7">Value:</span> <strong>${_peFormatValue(d.data.paramValue)}</strong></div>` +
             `<div><span style="opacity:.7">Revit ID:</span> ${tile?.revitId || '\u2014'}</div>` +
             `<div><span style="opacity:.7">File:</span> ${(d.data.files || []).join(', ') || '\u2014'}</div>` +
-            `<div style="opacity:.6;font-size:10px;margin-top:4px;">${isSelected ? 'Click to deselect' : 'Click to select \xb7 then use Show in Viewer \u25ba'}</div>`
+            `<div style="opacity:.6;font-size:10px;margin-top:4px;">${isSelected ? 'Click to deselect' : 'Click to select'}</div>`
         );
     }).on('mouseout', _peHideTooltip);
 
@@ -1954,7 +1956,7 @@ function _peRenderZoom(byValue, paramName, container) {
     const selBar = document.createElement('div');
     selBar.id = 'peZoomSelBar';
     selBar.dataset.paramname = paramName;
-    selBar.style.cssText = 'display:flex;padding:7px 12px;background:#f0f7ff;border:1px solid #b8d9f5;border-radius:6px;margin:4px 4px 0;flex-direction:row;align-items:center;gap:10px;font-size:13px;flex-wrap:wrap;';
+    selBar.className = 'pe-sel-bar';
     container.appendChild(selBar);
     _peUpdateZoomSelBar(paramName);  // populate bar with current state before measuring height
     const _nonSvgH = Array.from(container.children).reduce((s, el) => s + el.offsetHeight, 0);
@@ -2045,7 +2047,7 @@ function _peRenderZoom(byValue, paramName, container) {
     });
     node.on('mousemove', (event, d) => {
         const isSelected = window._peZoomSelected?.has(d.data.name);
-        const hint = isSelected ? 'Click to deselect' : ((d.data.name === 'Null' || d.data.name === 'Empty') && d.data.count === 0) ? 'Click to count \u00b7 then use Show in Viewer â–º' : 'Click to select \u00b7 then use Show in Viewer â–º';
+        const hint = isSelected ? 'Click to deselect' : ((d.data.name === 'Null' || d.data.name === 'Empty') && d.data.count === 0) ? 'Click to count' : 'Click to select';
         const tooltipLabel = d.data._parentKey
             ? `<strong>(empty)</strong><span style="opacity:.5;font-size:10px;"> Revit ID: ${d.data._displayName || ''}</span>`
             : `<strong>${_peFormatValue(d.data.name)}</strong>`;

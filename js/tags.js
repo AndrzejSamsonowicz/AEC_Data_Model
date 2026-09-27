@@ -176,7 +176,7 @@
         var btn = document.getElementById('viewerTagsBtn');
         if (!btn) return;
         btn.classList.toggle('tags-active', state.visible);
-        btn.textContent = state.visible ? 'Tags On' : 'Tags Off';
+        btn.textContent = state.visible ? 'Tags on' : 'Tags off';
     }
 
     function setVisible(v) {
